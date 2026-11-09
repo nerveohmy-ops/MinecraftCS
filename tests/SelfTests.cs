@@ -11,6 +11,18 @@ internal static unsafe partial class Program
         Check(FloorChunk(-1)==-1 && FloorChunk(-ChunkSize)==-1 && FloorChunk(-ChunkSize-1)==-2 && Mod(-1,ChunkSize)==ChunkSize-1,"Negative coordinate mapping");
         GenerateWorld(); SpawnPlayer();
         Check(!Collides(),"Spawn clear");
+        Check(H == 64 && pos.Y > 32, "World has room beneath the surface");
+        bool hasCave = false, solidFloor = true;
+        for (int cz = 5; cz <= 7; cz++)
+        for (int cx = 5; cx <= 7; cx++)
+        {
+            GenerateChunk(cx, cz);
+            byte[] blocks = chunks[(cx, cz)].Blocks;
+            solidFloor &= blocks.Take(ChunkSize * ChunkSize).All(b => b != Air);
+            hasCave |= blocks.Skip(ChunkSize * ChunkSize).Take((AddedDepth - 1) * ChunkSize * ChunkSize).Contains(Air);
+        }
+        Check(solidFloor, "Bedrock stays solid");
+        Check(hasCave, "Generated underground contains caves");
         GenerateChunk(-1,-1); GenerateChunk(-2,-1);
         var expected=(byte[])chunks[(-1,-1)].Blocks.Clone();
         chunks.Clear(); GenerateChunk(-2,-1); GenerateChunk(-1,-1);
@@ -35,16 +47,31 @@ internal static unsafe partial class Program
         Check(Get(farCoord,0,-farCoord)!=Air,"Terrain generated beyond original world borders");
         roundTrip.Chunks[0].Blocks[0]=255;
         Check(!ValidSave(roundTrip),"Invalid blocks rejected");
-        var legacy=new SavedWorld { Width=W,Height=H,Depth=D,Blocks=new byte[W*H*D],X=48,Y=20,Z=48 };
+        var legacy=new SavedWorld { Width=W,Height=32,Depth=D,Blocks=new byte[W*32*D],X=48,Y=20,Z=48 };
         legacy.Blocks[2+W*(3+D*4)]=Wood;
         Check(ValidSave(legacy),"Legacy world accepted");
         RestoreWorld(legacy);
-        Check(Get(2,4,3)==Air,"Legacy distant chunk initially unloaded");
+        Check(Get(2,H-32+4,3)==Air,"Legacy distant chunk initially unloaded");
         GenerateChunk(0,0);
-        Check(Get(2,4,3)==Wood,"Legacy builds migrated at original coordinates");
+        Check(Get(2,H-32+4,3)==Wood && pos.Y==20+H-32,"Legacy builds and player migrated together");
         legacy.Version=2; legacy.GeneratedChunks=new bool[144]; legacy.GeneratedChunks[0]=true;
         RestoreWorld(legacy);
         Check(savedChunks.Count==1,"Legacy partial world imports generated chunks only");
+        foreach (int size in new[] { 8, ChunkSize })
+        {
+            byte[] oldBlocks = new byte[size * size * LegacyHeight];
+            oldBlocks[1 + size * (2 + size * 5)] = Bricks;
+            var oldChunkWorld = new SavedWorld
+            {
+                Version = 3, X = 2, Y = 20, Z = 3,
+                Chunks = new() { new ChunkSave { X = -1, Z = -1, Blocks = oldBlocks } }
+            };
+            Check(ValidSave(oldChunkWorld), $"Legacy {size}x{size} chunk accepted");
+            RestoreWorld(oldChunkWorld);
+            Check(Get(1 - size, AddedDepth + 5, 2 - size) == Bricks &&
+                Get(2 - size, AddedDepth + 5, 2 - size) == Air,
+                $"Legacy {size}x{size} chunk keeps placed and removed blocks");
+        }
         chunks.Clear(); savedChunks.Clear();
         GenerateChunk(0,0); Array.Clear(chunks[(0,0)].Blocks);
         pos=new Vector3(2.5f,1,2.5f); crouching=true;
@@ -57,6 +84,9 @@ internal static unsafe partial class Program
         occX=-48; occZ=-48; BuildOccupancy();
         int offset=((2-occZ)*OccW+(2-occX)+W*2)*4;
         Check(occ[offset]==255,"Moving shadow window handles world offsets");
+        SetBlock(2, AddedDepth + 2, 2, Stone);
+        int upperOffset = offset + D * OccW * 4;
+        Check(occ[upperOffset] == 255, "Upper shadow layer tracks tall-world blocks");
         Array.Clear(chunks[(0,0)].Blocks);
         Check(VertexAO(2,0,2,2,0)==255,"Open face has no baked occlusion");
         SetBlock(1,1,2,Stone);

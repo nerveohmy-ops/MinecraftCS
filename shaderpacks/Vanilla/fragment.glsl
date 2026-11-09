@@ -28,7 +28,7 @@ float safeDir(float v) { return abs(v) < 1e-5 ? (v < 0.0 ? -1e-5 : 1e-5) : v; }
 bool occupied(ivec3 c)
 {
     if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(WX,WY,WZ)))) return false;
-    return texelFetch(texture1, ivec2(c.x + WX * c.y, c.z), 0).r > 0.5;
+    return texelFetch(texture1, ivec2(c.x + WX * (c.y % 32), c.z + WZ * (c.y / 32)), 0).r > 0.5;
 }
 
 // 1.0 — солнце видно, 0.0 — точка в тени

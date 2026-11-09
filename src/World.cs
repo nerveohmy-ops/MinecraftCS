@@ -1,7 +1,99 @@
+using Raylib_cs;
+using System.Numerics;
+
 namespace MinecraftCS;
 
 internal static unsafe partial class Program
 {
+    const int ChunkSize = 16;                   // чанк 16x16 (по высоте — весь мир)
+    const int ChunksX = 12, ChunksZ = 12;       // размер подвижного окна теней и прежнего формата сохранений
+    const int W = ChunkSize * ChunksX;          // ширина окна теней (16 * 12 = 192)
+    const int D = ChunkSize * ChunksZ;          // глубина окна теней (16 * 12 = 192)
+    const int LegacyHeight = 32, H = 64;
+    const int AddedDepth = H - LegacyHeight;
+
+    const byte Air = 0, Grass = 1, Dirt = 2, Stone = 3, Sand = 4, Wood = 5, Leaves = 6, Planks = 7, Bricks = 8, Cobblestone = 9;
+    const int SandLevel = 10 + AddedDepth;                   // ниже этой высоты — пляж (песок)
+
+    const uint Seed = 1337;
+
+    // ════════════════════════ ШУМ (Value Noise) ════════════════════════
+    static uint Hash(int x, int y, int z)
+    {
+        unchecked
+        {
+            uint h = (uint)(x * 73856093) ^ (uint)(y * 19349663) ^ (uint)(z * 83492791) ^ 0x9E3779B9u ^ Seed;
+            h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+            return h;
+        }
+    }
+
+    static float Rand(int x, int y, int z) => (Hash(x, y, z) & 0xFFFF) / 65535f;
+    static float Smooth(float t) => t * t * (3f - 2f * t);
+    static float Lerp(float a, float b, float t) => a + (b - a) * t;
+
+    static float Noise2(float x, float z, int octave)
+    {
+        int xi = (int)MathF.Floor(x), zi = (int)MathF.Floor(z);
+        float u = Smooth(x - xi), v = Smooth(z - zi);
+        return Lerp(Lerp(Rand(xi, octave, zi), Rand(xi + 1, octave, zi), u),
+                    Lerp(Rand(xi, octave, zi + 1), Rand(xi + 1, octave, zi + 1), u), v);
+    }
+
+    static float Noise3(float x, float y, float z)
+    {
+        int xi = (int)MathF.Floor(x), yi = (int)MathF.Floor(y), zi = (int)MathF.Floor(z);
+        float u = Smooth(x - xi), v = Smooth(y - yi), w = Smooth(z - zi);
+        float Corner(int dx, int dy, int dz) => Rand(xi + dx + 5000, yi + dy, zi + dz);
+        float a = Lerp(Lerp(Corner(0, 0, 0), Corner(1, 0, 0), u), Lerp(Corner(0, 1, 0), Corner(1, 1, 0), u), v);
+        float b = Lerp(Lerp(Corner(0, 0, 1), Corner(1, 0, 1), u), Lerp(Corner(0, 1, 1), Corner(1, 1, 1), u), v);
+        return Lerp(a, b, w);
+    }
+
+    // Сумма нескольких октав, результат 0..1
+    static float Fbm2(float x, float z)
+    {
+        float sum = 0, amp = 0.5f, freq = 1f, norm = 0;
+        for (int o = 0; o < 4; o++)
+        {
+            sum += Noise2(x * freq, z * freq, o) * amp;
+            norm += amp; amp *= 0.5f; freq *= 2f;
+        }
+        return sum / norm;
+    }
+
+    // ════════════════════════ МИР И ГЕНЕРАЦИЯ ════════════════════════
+    static int LocalIndex(int x, int y, int z) => Mod(x, ChunkSize) + ChunkSize * (Mod(z, ChunkSize) + ChunkSize * y);
+    static byte Get(int x, int y, int z)
+    {
+        if (y < 0 || y >= H) return Air;
+        return chunks.TryGetValue((FloorChunk(x), FloorChunk(z)), out var chunk) ? chunk.Blocks[LocalIndex(x,y,z)] : Air;
+    }
+    static void SetBlock(int x, int y, int z, byte b)
+    {
+        if (y < 0 || y >= H || !chunks.TryGetValue((FloorChunk(x), FloorChunk(z)), out var chunk)) return;
+        chunk.Blocks[LocalIndex(x,y,z)] = b;
+        chunk.Modified = true;
+        MarkNeighbors(chunk.X, chunk.Z);
+        SetOcc(x,y,z,b != Air);
+    }
+
+    static int TopY(int x, int z)
+    {
+        for (int y = H - 1; y >= 0; y--)
+            if (Get(x, y, z) != Air) return y;
+        return -1;
+    }
+
+    static void GenerateWorld() { GenerateChunk(6, 6); }
+
+    static void SpawnPlayer()
+    {
+        int sx = W / 2, sz = D / 2;
+        pos = new Vector3(sx + 0.5f, TopY(sx, sz) + 1f, sz + 0.5f);
+        vel = Vector3.Zero;
+    }
+
     // Настраиваемая дальность прорисовки (регулируется ползунком в паузе Esc)
     const int MinRenderRadius = 2;              // минимум 2 чанка (32 блока)
     const int MaxRenderRadius = 8;              // максимум 8 чанков (128 блоков)
@@ -10,7 +102,7 @@ internal static unsafe partial class Program
     {
         public int X, Z;
         public byte[] Blocks = new byte[ChunkSize * ChunkSize * H];
-        public Raylib_cs.Mesh Mesh;
+        public Mesh Mesh;
         public bool HasMesh, Dirty = true, Modified;
     }
     static readonly Dictionary<(int X, int Z), Chunk> chunks = new();
@@ -57,10 +149,21 @@ internal static unsafe partial class Program
                 Math.Abs(p.Key.Z-(int)MathF.Floor(friend.Z/ChunkSize)) > 2)).ToArray())
         {
             if (pair.Value.Modified) savedChunks[pair.Key] = pair.Value.Blocks;
-            if (pair.Value.HasMesh) Raylib_cs.Raylib.UnloadMesh(pair.Value.Mesh);
+            if (pair.Value.HasMesh) Raylib.UnloadMesh(pair.Value.Mesh);
             chunks.Remove(pair.Key);
             MarkNeighbors(pair.Key.X,pair.Key.Z);
         }
+    }
+
+    static byte UndergroundBlock(int x, int y, int z)
+    {
+        if (y <= 1 || y >= AddedDepth - 2) return Stone;
+
+        // Intersect two noise bands to form tunnels across chunk borders.
+        float first = Noise3(x * 0.055f, y * 0.085f, z * 0.055f);
+        if (MathF.Abs(first - 0.5f) > 0.095f) return Stone;
+        float second = Noise3(x * 0.047f + 61f, y * 0.072f - 19f, z * 0.047f + 37f);
+        return MathF.Abs(second - 0.5f) < 0.09f ? Air : Stone;
     }
 
     static void GenerateChunk(int cx, int cz)
@@ -85,13 +188,13 @@ internal static unsafe partial class Program
         for (int z = z0; z < z1; z++)
         {
             float n = Fbm2(x * 0.02f + 50f, z * 0.02f + 50f);
-            float h = 13f + (n - 0.5f) * 22f;
+            float h = AddedDepth + 13f + (n - 0.5f) * 22f;
             int depth = 0;
             bool sandColumn = false;
 
-            for (int y = H - 1; y >= 0; y--)
+            for (int y = H - 1; y >= AddedDepth; y--)
             {
-                bool solid = y == 0;
+                bool solid = y == AddedDepth;
                 if (!solid)
                 {
                     float dy = y - h;
@@ -108,9 +211,9 @@ internal static unsafe partial class Program
                     else b = Stone;
                     depth++;
                 }
-                target[(x - x0) + width * ((z - z0) + depthZ * y)] = b;
+                target[Index(x, y, z)] = b;
             }
-
+            for (int y = 0; y < AddedDepth; y++) target[Index(x, y, z)] = UndergroundBlock(x, y, z);
         }
         int[] tops = new int[width * depthZ];
         bool[] grassy = new bool[tops.Length];
