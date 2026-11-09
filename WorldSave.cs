@@ -199,10 +199,21 @@ internal static unsafe partial class Program
             int handleW = 14, handleH = 22;
             Raylib.DrawRectangleRounded(new Rectangle(handleX - handleW / 2, sliderY - (handleH - sliderH) / 2, handleW, handleH), 0.3f, 4, Col(245, 250, 255));
 
-            Center("Esc - Resume", h / 2 + 15, 22);
-            Center("F5 - Save world", h / 2 + 47, 22);
-            Center("Q - Save and quit", h / 2 + 79, 22);
-            Center("M - Steam co-op", h / 2 + 111, 22);
+            Center("Esc - Resume", h / 2 + 10, 22);
+            Center("F5 - Save world", h / 2 + 38, 22);
+            Center("S - Shaders", h / 2 + 66, 22);
+            Center("M - Steam co-op", h / 2 + 94, 22);
+            Center("Q - Save and quit", h / 2 + 122, 22);
+
+            Rectangle btnShaders = new((w - 240) / 2, h / 2 + 60, 240, 26);
+            if (Raylib.IsMouseButtonPressed(MouseButton.Left) && Raylib.CheckCollisionPointRec(mouse, btnShaders))
+            {
+                shaderMenuOpen = true;
+                ScanShaderPacks();
+            }
+
+
+
         }
         if (Raylib.GetTime() < statusUntil)
             Raylib.DrawText(status, (w - Raylib.MeasureText(status, 20)) / 2, h - 135, 20, Col(255, 240, 150));

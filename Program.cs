@@ -764,6 +764,9 @@ internal static unsafe partial class Program
         float fFar = renderRadius * ChunkSize - 4.0f;
         Raylib.SetShaderValue(worldShader, locFogNear, &fNear, ShaderUniformDataType.Float);
         Raylib.SetShaderValue(worldShader, locFogFar, &fFar, ShaderUniformDataType.Float);
+        float gt = (float)Raylib.GetTime();
+        if (locGameTime != -1)
+            Raylib.SetShaderValue(worldShader, locGameTime, &gt, ShaderUniformDataType.Float);
         Vector3 origin = new(occX, 0, occZ);
         Raylib.SetShaderValue(worldShader, locOccOrigin, &origin, ShaderUniformDataType.Vec3);
         Vector3 d = sunDir, c = sunColor, a = ambientColor;
@@ -872,6 +875,7 @@ internal static unsafe partial class Program
     {
         PollCoop(dt);
         if (coopPanel) { UpdateCoopMenu(); return; }
+        if (shaderMenuOpen) { UpdateShaderMenu(); return; }
         if (Raylib.IsKeyPressed(KeyboardKey.Escape) || (!Raylib.IsWindowFocused() && !paused))
         {
             paused = !paused;
@@ -881,6 +885,7 @@ internal static unsafe partial class Program
         if (Raylib.IsKeyPressed(KeyboardKey.F5)) SaveWorld();
         if (paused)
         {
+            if (Raylib.IsKeyPressed(KeyboardKey.S)) { shaderMenuOpen = true; ScanShaderPacks(); }
             if (Raylib.IsKeyPressed(KeyboardKey.M)) coopPanel = true;
             if (Raylib.IsKeyPressed(KeyboardKey.Q)) quitRequested = true;
             return;
@@ -972,6 +977,7 @@ internal static unsafe partial class Program
         DrawHud();   // 2D поверх 3D-сцены
         DrawPauseAndStatus();
         if (coopPanel) DrawCoopMenu();
+        if (shaderMenuOpen) DrawShaderMenu();
         Raylib.EndDrawing();
     }
 
@@ -1014,6 +1020,7 @@ internal static unsafe partial class Program
         BuildOccupancy();
         CreateOccupancyTexture();
         InitLighting();
+        InitShaderManager();
         RebuildDirtyChunks(int.MaxValue);
         if (renderTest) { pitch = -0.65f; shadowsOn = benchmark; }
         if (benchmark)
@@ -1071,6 +1078,7 @@ internal static unsafe partial class Program
             if (chunk.HasMesh) Raylib.UnloadMesh(chunk.Mesh);
         Raylib.UnloadTexture(atlas);
         Raylib.UnloadTexture(occTex);
+        if (dirtUiLoaded) Raylib.UnloadTexture(dirtUiTex);
         if (shaderOk) Raylib.UnloadShader(worldShader);
         Raylib.CloseWindow();
         CloseAmbientAudio();

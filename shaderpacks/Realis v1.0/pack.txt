@@ -1,0 +1,2 @@
+Realis v1.0
+Physically based lighting, GGX specular, atmospheric scattering, foliage SSS, and ACES tonemapping.
