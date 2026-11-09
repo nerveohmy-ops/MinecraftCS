@@ -1,0 +1,20 @@
+# Build and binary folders
+bin/
+bin/**
+obj/
+obj/**
+**/bin/**
+**/obj/**
+dist/
+dist/**
+
+# Visual Studio / IDE temporary files
+.vs/
+.vs/**
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Logs & temp
+*.log

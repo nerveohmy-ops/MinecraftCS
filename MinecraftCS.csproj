@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MinecraftCS</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Configurations>Debug;Release;SteamTest</Configurations>
+    <PlatformTarget>x64</PlatformTarget>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="Assets/Audio/**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Assets/Textures/**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <PackageReference Include="Raylib-cs" Version="6.1.0" />
+    <PackageReference Include="Steamworks.NET" Version="2024.8.0" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'SteamTest'">
+    <DefineConstants>$(DefineConstants);STEAM_TEST</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="SteamAppId" Value="$(SteamAppId)" />
+    <None Update="SteamNative/steam_api64.dll" Link="steam_api64.dll"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="SteamNative/LICENSE.txt" Link="Steamworks.NET-LICENSE.txt"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="RejectSpacewarRelease" BeforeTargets="PrepareForBuild"
+          Condition="'$(Configuration)' != 'SteamTest' and '$(SteamAppId)' == '480'">
+    <Error Text="Spacewar AppID 480 requires the SteamTest configuration." />
+  </Target>
+  <Target Name="WriteTestSteamAppId" AfterTargets="Build"
+          Condition="'$(Configuration)' == 'SteamTest'">
+    <WriteLinesToFile File="$(TargetDir)steam_appid.txt" Lines="480" Overwrite="true" />
+  </Target>
+
+</Project>
