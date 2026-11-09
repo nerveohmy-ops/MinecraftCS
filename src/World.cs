@@ -63,7 +63,7 @@ internal static unsafe partial class Program
     }
 
     // ════════════════════════ МИР И ГЕНЕРАЦИЯ ════════════════════════
-    static int LocalIndex(int x, int y, int z) => Mod(x, ChunkSize) + ChunkSize * (Mod(z, ChunkSize) + ChunkSize * y);
+    static int LocalIndex(int x, int y, int z) => ChunkLocal(x) + ChunkSize * (ChunkLocal(z) + ChunkSize * y);
     static byte Get(int x, int y, int z)
     {
         if (y < 0 || y >= H) return Air;
@@ -72,10 +72,13 @@ internal static unsafe partial class Program
     static void SetBlock(int x, int y, int z, byte b)
     {
         if (y < 0 || y >= H || !chunks.TryGetValue((FloorChunk(x), FloorChunk(z)), out var chunk)) return;
-        chunk.Blocks[LocalIndex(x,y,z)] = b;
+        int index = LocalIndex(x, y, z);
+        byte previous = chunk.Blocks[index];
+        if (previous == b) return;
+        chunk.Blocks[index] = b;
         chunk.Modified = true;
-        MarkNeighbors(chunk.X, chunk.Z);
-        SetOcc(x,y,z,b != Air);
+        MarkDirtyChunks(FloorChunk(x - 1), FloorChunk(x + 1), FloorChunk(z - 1), FloorChunk(z + 1));
+        if ((previous == Air) != (b == Air)) SetOcc(x, y, z, b != Air);
     }
 
     static int TopY(int x, int z)
@@ -101,57 +104,83 @@ internal static unsafe partial class Program
     sealed class Chunk
     {
         public int X, Z;
-        public byte[] Blocks = new byte[ChunkSize * ChunkSize * H];
-        public Mesh Mesh;
-        public bool HasMesh, Dirty = true, Modified;
+        public byte[] Blocks;
+        public List<Mesh> Meshes;
+        public bool Dirty = true, Modified;
     }
     static readonly Dictionary<(int X, int Z), Chunk> chunks = new();
     static readonly Dictionary<(int X, int Z), byte[]> savedChunks = new();
-    static int Mod(int v, int n) => (v % n + n) % n;
-    static int FloorChunk(int v) => (v - Mod(v, ChunkSize)) / ChunkSize;
-    static int ChunkDistance((int X, int Z) key) => Math.Max(
-        Math.Abs(key.X - (int)MathF.Floor(pos.X / ChunkSize)),
-        Math.Abs(key.Z - (int)MathF.Floor(pos.Z / ChunkSize)));
+    // ChunkSize is a power of two; masks and signed shifts also work west/north of zero.
+    static int ChunkLocal(int value) => value & (ChunkSize - 1);
+    static int FloorChunk(int value) => value >> BitOperations.TrailingZeroCount((uint)ChunkSize);
+    static (int X, int Z) PlayerChunk => ((int)MathF.Floor(pos.X / ChunkSize), (int)MathF.Floor(pos.Z / ChunkSize));
+
+    static readonly (int X, int Z)[] nearbyOffsets =
+        (from x in Enumerable.Range(-MaxRenderRadius, MaxRenderRadius * 2 + 1)
+         from z in Enumerable.Range(-MaxRenderRadius, MaxRenderRadius * 2 + 1)
+         orderby Math.Max(Math.Abs(x), Math.Abs(z))
+         select (x, z)).ToArray();
+    static readonly List<(int X, int Z)> chunksToEvict = new();
+
+    static int ChunkDistance((int X, int Z) key, (int X, int Z) center) =>
+        Math.Max(Math.Abs(key.X - center.X), Math.Abs(key.Z - center.Z));
+
     static IEnumerable<(int X, int Z)> NearbyChunkIndices(int radius)
     {
-        int cx = (int)MathF.Floor(pos.X / ChunkSize), cz = (int)MathF.Floor(pos.Z / ChunkSize);
-        return Enumerable.Range(cx-radius, radius*2+1)
-            .SelectMany(x => Enumerable.Range(cz-radius, radius*2+1).Select(z => (X:x,Z:z)))
-            .OrderBy(ChunkDistance);
+        var center = PlayerChunk;
+        int width = radius * 2 + 1;
+        for (int i = 0; i < width * width; i++)
+            yield return (center.X + nearbyOffsets[i].X, center.Z + nearbyOffsets[i].Z);
     }
-    static void MarkNeighbors(int x, int z)
+
+    static void MarkDirtyChunks(int minX, int maxX, int minZ, int maxZ)
     {
-        for (int dx=-1;dx<=1;dx++)
-        for (int dz=-1;dz<=1;dz++)
-            if (chunks.TryGetValue((x+dx,z+dz), out var c)) c.Dirty = true;
+        for (int x = minX; x <= maxX; x++)
+        for (int z = minZ; z <= maxZ; z++)
+            if (chunks.TryGetValue((x, z), out var chunk)) chunk.Dirty = true;
     }
+
+    static void MarkNeighbors(int x, int z) => MarkDirtyChunks(x - 1, x + 1, z - 1, z + 1);
+
     static void UpdateOccupancyOrigin()
     {
-        int x = ((int)MathF.Floor(pos.X / ChunkSize) - ChunksX/2) * ChunkSize;
-        int z = ((int)MathF.Floor(pos.Z / ChunkSize) - ChunksZ/2) * ChunkSize;
+        var center = PlayerChunk;
+        int x = (center.X - ChunksX / 2) * ChunkSize;
+        int z = (center.Z - ChunksZ / 2) * ChunkSize;
         if (x == occX && z == occZ) return;
         occX = x; occZ = z;
         BuildOccupancy();
     }
+
     static void StreamChunks()
     {
         UpdateOccupancyOrigin();
-        foreach (var key in NearbyChunkIndices(1)) GenerateChunk(key.X,key.Z);
+        foreach (var key in NearbyChunkIndices(1)) GenerateChunk(key.X, key.Z);
         foreach (var key in NearbyChunkIndices(renderRadius))
         {
             if (chunks.ContainsKey(key)) continue;
-            GenerateChunk(key.X,key.Z);
+            GenerateChunk(key.X, key.Z);
             break;
         }
-        foreach (var pair in chunks.Where(p => ChunkDistance(p.Key) > renderRadius+2 &&
-            (!coopMatched || !coopHost || friend == null ||
-                Math.Abs(p.Key.X-(int)MathF.Floor(friend.X/ChunkSize)) > 2 ||
-                Math.Abs(p.Key.Z-(int)MathF.Floor(friend.Z/ChunkSize)) > 2)).ToArray())
+
+        var center = PlayerChunk;
+        bool keepGuestChunks = coopMatched && coopHost && friend != null;
+        (int X, int Z) guestCenter = keepGuestChunks
+            ? ((int)MathF.Floor(friend.X / ChunkSize), (int)MathF.Floor(friend.Z / ChunkSize)) : default;
+        chunksToEvict.Clear();
+        foreach (var key in chunks.Keys)
+            if (ChunkDistance(key, center) > renderRadius + 2 &&
+                (!keepGuestChunks || ChunkDistance(key, guestCenter) > 2))
+                chunksToEvict.Add(key);
+
+        foreach (var key in chunksToEvict)
         {
-            if (pair.Value.Modified) savedChunks[pair.Key] = pair.Value.Blocks;
-            if (pair.Value.HasMesh) Raylib.UnloadMesh(pair.Value.Mesh);
-            chunks.Remove(pair.Key);
-            MarkNeighbors(pair.Key.X,pair.Key.Z);
+            var chunk = chunks[key];
+            if (chunk.Modified) savedChunks[key] = chunk.Blocks;
+            UnloadChunkMeshes(chunk);
+            WriteChunkOccupancy(chunk, clear: true);
+            chunks.Remove(key);
+            MarkNeighbors(key.X, key.Z);
         }
     }
 
@@ -169,15 +198,18 @@ internal static unsafe partial class Program
     static void GenerateChunk(int cx, int cz)
     {
         if (chunks.ContainsKey((cx,cz))) return;
-        var chunk = new Chunk { X = cx, Z = cz };
-        if (savedChunks.TryGetValue((cx,cz), out var saved))
+        var chunk = new Chunk
         {
-            chunk.Blocks = (byte[])saved.Clone();
-            chunks[(cx,cz)] = chunk;
-            MarkNeighbors(cx,cz);
-            CopyChunkOccupancy(chunk);
-            return;
-        }
+            X = cx, Z = cz,
+            Blocks = savedChunks.TryGetValue((cx, cz), out var saved) ? (byte[])saved.Clone() : GenerateChunkBlocks(cx, cz)
+        };
+        chunks[(cx, cz)] = chunk;
+        MarkNeighbors(cx, cz);
+        WriteChunkOccupancy(chunk);
+    }
+
+    static byte[] GenerateChunkBlocks(int cx, int cz)
+    {
         // Generate a terrain halo to determine trees independently of load order.
         int x0 = cx * ChunkSize - 2, z0 = cz * ChunkSize - 2;
         int x1 = (cx + 1) * ChunkSize + 2, z1 = (cz + 1) * ChunkSize + 2;
@@ -249,23 +281,12 @@ internal static unsafe partial class Program
                 }
             }
         }
+        byte[] blocks = new byte[ChunkSize * ChunkSize * H];
         for (int y = 0; y < H; y++)
-        for (int z = cz * ChunkSize; z < (cz + 1) * ChunkSize; z++)
-        for (int x = cx * ChunkSize; x < (cx + 1) * ChunkSize; x++)
-        {
-            byte block = target[Index(x, y, z)];
-            chunk.Blocks[LocalIndex(x,y,z)] = block;
-            SetOcc(x, y, z, block != Air);
-        }
-        chunks[(cx,cz)] = chunk;
-        MarkNeighbors(cx,cz);
+        for (int z = 0; z < ChunkSize; z++)
+            Array.Copy(target, Index(cx * ChunkSize, y, cz * ChunkSize + z),
+                blocks, ChunkSize * (z + ChunkSize * y), ChunkSize);
+        return blocks;
     }
-    static void CopyChunkOccupancy(Chunk chunk)
-    {
-        for (int y=0;y<H;y++)
-        for (int z=0;z<ChunkSize;z++)
-        for (int x=0;x<ChunkSize;x++)
-            SetOcc(chunk.X*ChunkSize+x,y,chunk.Z*ChunkSize+z,
-                chunk.Blocks[x+ChunkSize*(z+ChunkSize*y)] != Air);
-    }
+
 }

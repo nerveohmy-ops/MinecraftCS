@@ -11,7 +11,7 @@ internal static unsafe partial class Program
 {
     static readonly string ShaderpacksDir = Path.Combine(AppContext.BaseDirectory, "shaderpacks");
     static readonly List<string> shaderPacks = new();
-    static string currentShaderPack = "Realis v1.0";
+    static string currentShaderPack = "(internal) Vanilla";
     static bool shaderMenuOpen;
     static Texture2D dirtUiTex;
     static bool dirtUiLoaded;
@@ -125,14 +125,8 @@ internal static unsafe partial class Program
                 fsSrc = File.ReadAllText(fsFile);
             }
 
-            // Подстановка размеров окна теней
-            string processedFs = fsSrc
-                .Replace("@WX@", W.ToString())
-                .Replace("@WY@", H.ToString())
-                .Replace("@WZ@", D.ToString());
-
-            Shader newShader = Raylib.LoadShaderFromMemory(vsSrc, processedFs);
-            if (newShader.Id == 0)
+            Shader newShader = Raylib.LoadShaderFromMemory(vsSrc, PrepareFragmentShader(fsSrc));
+            if (!IsWorldShaderLoaded(newShader))
             {
                 ShowStatus($"Shader error: {packName}");
                 return false;
@@ -147,21 +141,7 @@ internal static unsafe partial class Program
             worldShader = newShader;
             shaderOk = true;
 
-            // Привязка uniform-переменных
-            locEye = Raylib.GetShaderLocation(worldShader, "eyePosition");
-            locFog = Raylib.GetShaderLocation(worldShader, "fogColor");
-            locSoft = Raylib.GetShaderLocation(worldShader, "softShadows");
-            locOccOrigin = Raylib.GetShaderLocation(worldShader, "occOrigin");
-            locSunDir = Raylib.GetShaderLocation(worldShader, "sunDir");
-            locSunColor = Raylib.GetShaderLocation(worldShader, "sunColor");
-            locAmbient = Raylib.GetShaderLocation(worldShader, "ambientColor");
-            locShadows = Raylib.GetShaderLocation(worldShader, "shadowsOn");
-            locFogNear = Raylib.GetShaderLocation(worldShader, "fogNear");
-            locFogFar = Raylib.GetShaderLocation(worldShader, "fogFar");
-            locGameTime = Raylib.GetShaderLocation(worldShader, "gameTime");
-
-            material.Shader = worldShader;
-            material.Maps[(int)MaterialMapIndex.Metalness].Texture = occTex;
+            BindWorldShader();
 
             currentShaderPack = packName;
             ShowStatus($"Shader active: {packName}");

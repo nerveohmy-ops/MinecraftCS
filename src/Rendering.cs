@@ -134,12 +134,38 @@ internal static unsafe partial class Program
     }
 
     // ════════════════════════ МЕШИ ЧАНКОВ ════════════════════════
-    static void BuildChunk(int cx, int cz)
-    {
-        var chunk = chunks[(cx, cz)];
-        if (chunk.HasMesh) { Raylib.UnloadMesh(chunk.Mesh); chunk.HasMesh = false; }
+    const int MeshRow = ChunkSize + 2, MeshLayer = MeshRow * MeshRow;
+    static readonly byte[] meshBlocks = new byte[MeshLayer * (H + 2)];
+    static readonly ushort[] meshIndices = CreateMeshIndices();
+    delegate bool EmitChunkPart(int vertexCount, ReadOnlySpan<ushort> indices);
 
-        vBuf.Clear(); uvBuf.Clear(); nBuf.Clear(); aoBuf.Clear();
+    static int MeshBlockIndex(int x, int y, int z) => x + 1 + (z + 1) * MeshRow + (y + 1) * MeshLayer;
+
+    static void PrepareMeshBlocks(int cx, int cz)
+    {
+        // A one-block halo includes the side and diagonal samples used by faces and AO.
+        Array.Clear(meshBlocks);
+        for (int dx = -1; dx <= 1; dx++)
+        for (int dz = -1; dz <= 1; dz++)
+        {
+            if (!chunks.TryGetValue((cx + dx, cz + dz), out var chunk)) continue;
+            int sourceX = dx < 0 ? ChunkSize - 1 : 0, sourceZ = dz < 0 ? ChunkSize - 1 : 0;
+            int targetX = dx < 0 ? -1 : dx * ChunkSize, targetZ = dz < 0 ? -1 : dz * ChunkSize;
+            int width = dx == 0 ? ChunkSize : 1, rows = dz == 0 ? ChunkSize : 1;
+            for (int y = 0; y < H; y++)
+            for (int row = 0; row < rows; row++)
+            {
+                int source = sourceX + ChunkSize * (sourceZ + row + ChunkSize * y);
+                Array.Copy(chunk.Blocks, source, meshBlocks, MeshBlockIndex(targetX, y, targetZ + row), width);
+            }
+        }
+    }
+
+    // The callback consumes the current vertex buffers before they are reused.
+    static bool BuildChunkGeometry(int cx, int cz, EmitChunkPart emit)
+    {
+        PrepareMeshBlocks(cx, cz);
+        ClearChunkGeometryBuffers();
         int vc = 0;
         const float e = 0.002f;   // отступ от краёв тайла, чтобы соседние текстуры не «просачивались»
 
@@ -148,14 +174,21 @@ internal static unsafe partial class Program
         for (int lx = 0; lx < ChunkSize; lx++)
         {
             int x = cx * ChunkSize + lx, z = cz * ChunkSize + lz;
-            byte b = Get(x, y, z);
+            int blockIndex = MeshBlockIndex(lx, y, lz);
+            byte b = meshBlocks[blockIndex];
             if (b == Air) continue;
 
             for (int f = 0; f < 6; f++)
             {
                 // Face culling: рисуем грань, только если за ней воздух
-                if (Get(x + FaceDir[f, 0], y + FaceDir[f, 1], z + FaceDir[f, 2]) != Air) continue;
-                if (vc + 4 > MaxVertsPerMesh) goto Done;   // защита от переполнения ushort-индексов
+                int outside = blockIndex + FaceDir[f, 0] + FaceDir[f, 1] * MeshLayer + FaceDir[f, 2] * MeshRow;
+                if (meshBlocks[outside] != Air) continue;
+                if (vc + 4 > MaxVertsPerMesh)
+                {
+                    if (!emit(vc, meshIndices.AsSpan(0, vc / 4 * 6))) return false;
+                    ClearChunkGeometryBuffers();
+                    vc = 0;
+                }
 
                 int tile = Tiles[b, f == 2 ? 0 : f == 3 ? 2 : 1];
                 for (int k = 0; k < 4; k++)
@@ -166,43 +199,104 @@ internal static unsafe partial class Program
                     uvBuf.Add((tile + (QuadUV[k, 0] == 0 ? e : 1f - e)) / TileCount);
                     uvBuf.Add(QuadUV[k, 1] == 0 ? e : 1f - e);
                     nBuf.Add(FaceDir[f, 0]); nBuf.Add(FaceDir[f, 1]); nBuf.Add(FaceDir[f, 2]);
-                    byte ao = VertexAO(x,y,z,f,k);
+                    byte ao = VertexAO(outside, f, k);
                     aoBuf.Add(ao); aoBuf.Add(ao); aoBuf.Add(ao); aoBuf.Add(255);
                 }
                 vc += 4;
             }
         }
-    Done:
-        if (vc == 0) return;
+        return vc == 0 || emit(vc, meshIndices.AsSpan(0, vc / 4 * 6));
+    }
 
-        Mesh mesh = new Mesh();
-        mesh.VertexCount = vc;
-        mesh.TriangleCount = vc / 2;
-        // Память для Raylib — только через Raylib.New, иначе UnloadMesh сломает кучу (Access Violation 0xC0000005)
-        mesh.Vertices = Raylib.New<float>((uint)(vc * 3));
-        mesh.TexCoords = Raylib.New<float>((uint)(vc * 2));
-        mesh.Normals = Raylib.New<float>((uint)(vc * 3));
-        mesh.Colors = Raylib.New<byte>((uint)(vc * 4));
-        for (int i = 0; i < vc * 4; i++) mesh.Colors[i] = aoBuf[i];
-        mesh.Indices = Raylib.New<ushort>((uint)(vc / 4 * 6));
+    static void ClearChunkGeometryBuffers()
+    {
+        vBuf.Clear();
+        uvBuf.Clear();
+        nBuf.Clear();
+        aoBuf.Clear();
+    }
 
-        for (int i = 0; i < vc * 3; i++) mesh.Vertices[i] = vBuf[i];
-        for (int i = 0; i < vc * 2; i++) mesh.TexCoords[i] = uvBuf[i];
-        for (int i = 0; i < vc * 3; i++) mesh.Normals[i] = nBuf[i];
-        for (int q = 0; q < vc / 4; q++)
+    static ushort[] CreateMeshIndices()
+    {
+        var indices = new ushort[MaxVertsPerMesh / 4 * 6];
+        for (int q = 0; q < MaxVertsPerMesh / 4; q++)
         {
             int vi = q * 4, ii = q * 6;
-            mesh.Indices[ii] = (ushort)vi;
-            mesh.Indices[ii + 1] = (ushort)(vi + 1);
-            mesh.Indices[ii + 2] = (ushort)(vi + 2);
-            mesh.Indices[ii + 3] = (ushort)vi;
-            mesh.Indices[ii + 4] = (ushort)(vi + 2);
-            mesh.Indices[ii + 5] = (ushort)(vi + 3);
+            indices[ii] = (ushort)vi;
+            indices[ii + 1] = (ushort)(vi + 1);
+            indices[ii + 2] = (ushort)(vi + 2);
+            indices[ii + 3] = (ushort)vi;
+            indices[ii + 4] = (ushort)(vi + 2);
+            indices[ii + 5] = (ushort)(vi + 3);
         }
+        return indices;
+    }
 
-        Raylib.UploadMesh(&mesh, false);   // загрузка вершин в VRAM
-        chunk.Mesh = mesh;
-        chunk.HasMesh = true;
+    static bool TryUploadChunkPart(int vertexCount, ReadOnlySpan<ushort> indices, out Mesh mesh)
+    {
+        mesh = new Mesh { VertexCount = vertexCount, TriangleCount = indices.Length / 3 };
+        bool uploaded = false;
+        try
+        {
+            // Allocate with Raylib's allocator so UnloadMesh can free these buffers.
+            mesh.Vertices = Raylib.New<float>((uint)(vertexCount * 3));
+            mesh.TexCoords = Raylib.New<float>((uint)(vertexCount * 2));
+            mesh.Normals = Raylib.New<float>((uint)(vertexCount * 3));
+            mesh.Colors = Raylib.New<byte>((uint)(vertexCount * 4));
+            mesh.Indices = Raylib.New<ushort>((uint)indices.Length);
+            if (mesh.Vertices == null || mesh.TexCoords == null || mesh.Normals == null ||
+                mesh.Colors == null || mesh.Indices == null) return false;
+
+            for (int i = 0; i < vertexCount * 3; i++) mesh.Vertices[i] = vBuf[i];
+            for (int i = 0; i < vertexCount * 2; i++) mesh.TexCoords[i] = uvBuf[i];
+            for (int i = 0; i < vertexCount * 3; i++) mesh.Normals[i] = nBuf[i];
+            for (int i = 0; i < vertexCount * 4; i++) mesh.Colors[i] = aoBuf[i];
+            indices.CopyTo(new Span<ushort>(mesh.Indices, indices.Length));
+
+            fixed (Mesh* target = &mesh) Raylib.UploadMesh(target, false);
+            // OpenGL buffer slots for positions, UV, normals, colors and indices.
+            uploaded = mesh.VboId != null && mesh.VboId[0] != 0 && mesh.VboId[1] != 0 &&
+                mesh.VboId[2] != 0 && mesh.VboId[3] != 0 && mesh.VboId[6] != 0;
+            return uploaded;
+        }
+        finally
+        {
+            if (!uploaded) Raylib.UnloadMesh(mesh);
+        }
+    }
+
+    static void UnloadChunkMeshes(Chunk chunk)
+    {
+        if (chunk.Meshes == null) return;
+        foreach (var mesh in chunk.Meshes) Raylib.UnloadMesh(mesh);
+        chunk.Meshes = null;
+    }
+
+    static bool BuildChunk(Chunk chunk)
+    {
+        var replacement = new List<Mesh>();
+        bool committed = false;
+        try
+        {
+            bool complete = BuildChunkGeometry(chunk.X, chunk.Z, (vertexCount, indices) =>
+            {
+                replacement.EnsureCapacity(replacement.Count + 1);
+                if (!TryUploadChunkPart(vertexCount, indices, out var mesh)) return false;
+                replacement.Add(mesh);
+                return true;
+            });
+            if (!complete) return false;
+
+            UnloadChunkMeshes(chunk);
+            chunk.Meshes = replacement;
+            committed = true;
+            return true;
+        }
+        finally
+        {
+            if (!committed)
+                foreach (var mesh in replacement) Raylib.UnloadMesh(mesh);
+        }
     }
 
     static void RebuildDirtyChunks(int budget = 3)
@@ -212,8 +306,7 @@ internal static unsafe partial class Program
         foreach (var key in NearbyChunkIndices(renderRadius))
         {
             if (!chunks.TryGetValue(key, out var chunk) || !chunk.Dirty) continue;
-            chunk.Dirty = false;
-            BuildChunk(key.X, key.Z);
+            chunk.Dirty = !BuildChunk(chunk);
             if (--budget == 0 || (limitTime && Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 2)) break;
         }
     }
@@ -280,21 +373,17 @@ internal static unsafe partial class Program
     }
 
     // Static contact lighting belongs to geometry, not to every screen pixel.
-    static byte VertexAO(int x, int y, int z, int face, int corner)
+    static byte VertexAO(int outside, int face, int corner)
     {
-        int nx=FaceDir[face,0], ny=FaceDir[face,1], nz=FaceDir[face,2];
-        int axisA = nx == 0 ? 0 : 1;
-        int axisB = nz == 0 ? 2 : 1;
-        int a = FaceVerts[face,corner,axisA] == 0 ? -1 : 1;
-        int b = FaceVerts[face,corner,axisB] == 0 ? -1 : 1;
-        int ax=axisA==0?a:0, ay=axisA==1?a:0;
-        int by=axisB==1?b:0, bz=axisB==2?b:0;
-        x+=nx; y+=ny; z+=nz;
-        int sideA=Get(x+ax,y+ay,z)!=Air?1:0;
-        int sideB=Get(x,y+by,z+bz)!=Air?1:0;
-        int diagonal=Get(x+ax,y+ay+by,z+bz)!=Air?1:0;
-        float ao=sideA*sideB==1?0.48f:1f-(sideA+sideB+diagonal)*0.16f;
-        return (byte)MathF.Round(255*ao);
+        int axisA = FaceDir[face, 0] == 0 ? 0 : 1;
+        int axisB = FaceDir[face, 2] == 0 ? 2 : 1;
+        int a = (FaceVerts[face, corner, axisA] == 0 ? -1 : 1) * (axisA == 0 ? 1 : MeshLayer);
+        int b = (FaceVerts[face, corner, axisB] == 0 ? -1 : 1) * (axisB == 1 ? MeshLayer : MeshRow);
+        int sideA = meshBlocks[outside + a] != Air ? 1 : 0;
+        int sideB = meshBlocks[outside + b] != Air ? 1 : 0;
+        int diagonal = meshBlocks[outside + a + b] != Air ? 1 : 0;
+        float ao = sideA * sideB == 1 ? 0.48f : 1f - (sideA + sideB + diagonal) * 0.16f;
+        return (byte)MathF.Round(255 * ao);
     }
 
     // ════════════════════════ СОЛНЦЕ, ТЕНИ, ШЕЙДЕР ════════════════════════
@@ -303,7 +392,7 @@ internal static unsafe partial class Program
     const int OccW = W * 32, OccH = D * (H / 32);
     const float DayLength = 300f;          // секунд на полные сутки
 
-    static readonly byte[] occ = new byte[OccW * OccH * 4];
+    static readonly byte[] occ = new byte[OccW * OccH];
     static bool occDirty;
     static Texture2D occTex;
     static Shader worldShader;
@@ -361,55 +450,7 @@ internal static unsafe partial class Program
         uniform float fogFar;
         out vec4 finalColor;
 
-        const int WX = @WX@;
-        const int WY = @WY@;
-        const int WZ = @WZ@;
-
-
-        const int MAX_STEPS = 128;
-
-        float safeDir(float v) { return abs(v) < 1e-5 ? (v < 0.0 ? -1e-5 : 1e-5) : v; }
-
-        bool occupied(ivec3 c)
-        {
-            if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(WX,WY,WZ)))) return false;
-            return texelFetch(texture1, ivec2(c.x + WX * (c.y % 32), c.z + WZ * (c.y / 32)), 0).r > 0.5;
-        }
-
-        // 1.0 — солнце видно, 0.0 — точка в тени
-        float sunVisibility(vec3 origin, vec3 dir)
-        {
-            vec3 d = vec3(safeDir(dir.x), safeDir(dir.y), safeDir(dir.z));
-            ivec3 cell = ivec3(floor(origin));
-            ivec3 stepDir = ivec3(d.x > 0.0 ? 1 : -1, d.y > 0.0 ? 1 : -1, d.z > 0.0 ? 1 : -1);
-            vec3 tDelta = abs(1.0 / d);
-            vec3 edge = vec3(cell) + vec3(d.x > 0.0 ? 1.0 : 0.0, d.y > 0.0 ? 1.0 : 0.0, d.z > 0.0 ? 1.0 : 0.0);
-            vec3 tMax = (edge - origin) / d;
-            for (int i = 0; i < MAX_STEPS; i++)
-            {
-                if (tMax.x < tMax.y && tMax.x < tMax.z) { cell.x += stepDir.x; tMax.x += tDelta.x; }
-                else if (tMax.y < tMax.z)               { cell.y += stepDir.y; tMax.y += tDelta.y; }
-                else                                    { cell.z += stepDir.z; tMax.z += tDelta.z; }
-                if (cell.y >= WY || cell.x < 0 || cell.x >= WX || cell.z < 0 || cell.z >= WZ) return 1.0;
-                if (cell.y >= 0 && occupied(cell)) return 0.0;
-            }
-            return 1.0;
-        }
-
-        float filteredShadow(vec3 p, float distanceXZ)
-        {
-            // Preserve detailed soft edges nearby; one ray is enough in the haze.
-            // Мягкие тени рядом с игроком, далее одного луча достаточно
-            if (softShadows < 0.5 || distanceXZ > 35.0) return sunVisibility(p,sunDir);
-            vec3 tangent = normalize(cross(sunDir,abs(sunDir.y) < 0.95 ? vec3(0,1,0) : vec3(1,0,0)));
-            vec3 bitangent = cross(sunDir,tangent);
-            // Fixed area-light samples: no animated noise or temporal flicker.
-            float radius = 0.025;
-            float v = sunVisibility(p,normalize(sunDir + tangent*radius));
-            v += sunVisibility(p,normalize(sunDir + (-0.5*tangent + 0.8660254*bitangent)*radius));
-            v += sunVisibility(p,normalize(sunDir + (-0.5*tangent - 0.8660254*bitangent)*radius));
-            return v / 3.0;
-        }
+        @SHADOW_TRACE@
         void main()
         {
             float distanceXZ = length((fragPos-eyePosition).xz);
@@ -417,11 +458,10 @@ internal static unsafe partial class Program
             // Voxel normals are exact axes. Do not normalize then truncate to integers:
             // GPU reciprocal-square-root rounding can turn 1 into 0.99999994.
             vec3 n = round(fragNormal);
-            vec3 p = fragPos - occOrigin;
             float ndl = max(dot(n, sunDir), 0.0);
             float vis = 1.0;
             if (shadowsOn > 0.5 && ndl > 0.0 && dot(sunColor, vec3(1.0)) > 0.01)
-                vis = filteredShadow(p + n * 0.025,distanceXZ);
+                vis = filteredShadow(fragPos + n * 0.025);
             float ao = fragAO;
             float hemisphere = 0.66 + 0.34 * max(n.y,0.0);
             vec3 bounce = vec3(0.055,0.043,0.028) * (1.0 - max(n.y,0.0));
@@ -434,32 +474,128 @@ internal static unsafe partial class Program
         }
         """;
 
+    const string ShadowTraceShaderSrc = """
+        const int WX = @WX@;
+        const int WY = @WY@;
+        const int WZ = @WZ@;
+        const int MAX_STEPS = 128;
+        uniform vec3 shadowRays[4];
+        uniform int shadowHeight;
+
+        float sunVisibility(vec3 origin, vec3 inverseDir)
+        {
+            // Address the moving texture window with integers, while the ray starts in world space.
+            vec3 block = floor(origin);
+            ivec3 cell = ivec3(block) - ivec3(occOrigin);
+            bool rises = inverseDir.y > 0.0;
+            int upperY = rises ? shadowHeight : WY;
+            if (rises && cell.y >= upperY) return 1.0;
+
+            vec3 positive = step(vec3(0.0), inverseDir);
+            ivec3 stepDir = ivec3(positive) * 2 - 1;
+            vec3 tDelta = abs(inverseDir);
+            vec3 tMax = (positive - (origin - block)) * inverseDir;
+            for (int i = 0; i < MAX_STEPS; i++)
+            {
+                if (tMax.x < tMax.y && tMax.x < tMax.z) { cell.x += stepDir.x; tMax.x += tDelta.x; }
+                else if (tMax.y < tMax.z)               { cell.y += stepDir.y; tMax.y += tDelta.y; }
+                else                                    { cell.z += stepDir.z; tMax.z += tDelta.z; }
+                if (uint(cell.x) >= uint(WX) || uint(cell.z) >= uint(WZ) || cell.y >= upperY) return 1.0;
+                if (cell.y < 0)
+                {
+                    if (!rises) return 1.0;
+                    continue;
+                }
+
+                ivec2 address = ivec2(cell.x + WX * (cell.y & 31), cell.z + WZ * (cell.y >> 5));
+                if (texelFetch(texture1, address, 0).r > 0.5) return 0.0;
+            }
+            return 1.0;
+        }
+
+        float filteredShadow(vec3 p)
+        {
+            if (softShadows < 0.5) return sunVisibility(p, shadowRays[0]);
+            float v = sunVisibility(p, shadowRays[1]);
+            v += sunVisibility(p, shadowRays[2]);
+            v += sunVisibility(p, shadowRays[3]);
+            return v / 3.0;
+        }
+        """;
+
+    static string PrepareFragmentShader(string source) => source
+        .Replace("@SHADOW_TRACE@", ShadowTraceShaderSrc)
+        .Replace("@WX@", W.ToString()).Replace("@WY@", H.ToString()).Replace("@WZ@", D.ToString());
+
+    static int shadowHeight, locShadowHeight, locShadowRays, locInvViewport;
+
+    static int FindShadowHeight()
+    {
+        for (int y = H - 1; y >= 0; y--)
+        for (int z = 0; z < D; z++)
+            if (occ.AsSpan(OccupancyIndex(0, y, z), W).Contains((byte)255)) return y + 1;
+        return 0;
+    }
+
+    static int OccupancyIndex(int x, int y, int z) =>
+        (z + D * (y / 32)) * OccW + x + W * (y % 32);
+
     static void SetOcc(int x, int y, int z, bool solid)
     {
         x -= occX; z -= occZ;
         if (x < 0 || x >= W || z < 0 || z >= D || y < 0 || y >= H) return;
-        int o = ((z + D * (y / 32)) * OccW + x + W * (y % 32)) * 4;
-        byte v = (byte)(solid ? 255 : 0);
-        occ[o] = v; occ[o + 1] = v; occ[o + 2] = v; occ[o + 3] = 255;
+        int index = OccupancyIndex(x, y, z);
+        byte value = solid ? (byte)255 : (byte)0;
+        if (occ[index] == value) return;
+        occ[index] = value;
+        occDirty = true;
+    }
+
+    static void WriteChunkOccupancy(Chunk chunk, bool clear = false)
+    {
+        int x0 = chunk.X * ChunkSize - occX, z0 = chunk.Z * ChunkSize - occZ;
+        int firstX = Math.Max(0, x0), endX = Math.Min(W, x0 + ChunkSize);
+        int firstZ = Math.Max(0, z0), endZ = Math.Min(D, z0 + ChunkSize);
+        if (firstX >= endX || firstZ >= endZ) return;
+
+        int width = endX - firstX;
+        for (int y = 0; y < H; y++)
+        for (int z = firstZ; z < endZ; z++)
+        {
+            int target = OccupancyIndex(firstX, y, z);
+            if (clear) Array.Clear(occ, target, width);
+            else
+            {
+                int source = firstX - x0 + ChunkSize * (z - z0 + ChunkSize * y);
+                for (int x = 0; x < width; x++)
+                    occ[target + x] = chunk.Blocks[source + x] == Air ? (byte)0 : (byte)255;
+            }
+        }
         occDirty = true;
     }
 
     static void BuildOccupancy()
     {
-        for (int y = 0; y < H; y++)
-        for (int z = 0; z < D; z++)
-        for (int x = 0; x < W; x++)
-            SetOcc(x + occX, y, z + occZ, Get(x + occX, y, z + occZ) != Air);
+        Array.Clear(occ);
+        foreach (var chunk in chunks.Values) WriteChunkOccupancy(chunk);
+        occDirty = true;
     }
 
     static void CreateOccupancyTexture()
     {
-        Image img = Raylib.GenImageColor(OccW, OccH, Col(0, 0, 0, 255));
-        occTex = Raylib.LoadTextureFromImage(img);
-        Raylib.UnloadImage(img);
+        // Shadow shaders sample the red channel only. Raylib uploads this borrowed buffer synchronously.
+        fixed (byte* data = occ)
+        {
+            Image image = new()
+            {
+                Data = data, Width = OccW, Height = OccH, Mipmaps = 1,
+                Format = PixelFormat.UncompressedGrayscale
+            };
+            occTex = Raylib.LoadTextureFromImage(image);
+        }
         Raylib.SetTextureFilter(occTex, TextureFilter.Point);
-        occDirty = true;
-        FlushOccupancy();
+        shadowHeight = FindShadowHeight();
+        occDirty = false;
     }
 
     // Отправляем карту занятости в видеопамять, только если мир менялся (сломали / поставили блок)
@@ -467,19 +603,22 @@ internal static unsafe partial class Program
     {
         if (!occDirty) return;
         occDirty = false;
+        shadowHeight = FindShadowHeight();
         fixed (byte* px = occ) Raylib.UpdateTexture(occTex, px);
     }
 
     static void InitLighting()
     {
-        string fs = FragmentShaderSrc
-            .Replace("@WX@", W.ToString()).Replace("@WY@", H.ToString()).Replace("@WZ@", D.ToString());
+        worldShader = Raylib.LoadShaderFromMemory(VertexShaderSrc, PrepareFragmentShader(FragmentShaderSrc));
+        shaderOk = IsWorldShaderLoaded(worldShader);
+        if (shaderOk) BindWorldShader();
+    }
 
+    static bool IsWorldShaderLoaded(Shader shader) =>
+        shader.Id != 0 && shader.Id != Rlgl.GetShaderIdDefault();
 
-        worldShader = Raylib.LoadShaderFromMemory(VertexShaderSrc, fs);
-        shaderOk = worldShader.Id != 0;
-        if (!shaderOk) return;   // шейдер не собрался — играем без освещения (ошибка видна в консоли)
-
+    static void BindWorldShader()
+    {
         locEye = Raylib.GetShaderLocation(worldShader, "eyePosition");
         locFog = Raylib.GetShaderLocation(worldShader, "fogColor");
         locFogNear = Raylib.GetShaderLocation(worldShader, "fogNear");
@@ -490,6 +629,10 @@ internal static unsafe partial class Program
         locSunColor = Raylib.GetShaderLocation(worldShader, "sunColor");
         locAmbient = Raylib.GetShaderLocation(worldShader, "ambientColor");
         locShadows = Raylib.GetShaderLocation(worldShader, "shadowsOn");
+        locGameTime = Raylib.GetShaderLocation(worldShader, "gameTime");
+        locShadowHeight = Raylib.GetShaderLocation(worldShader, "shadowHeight");
+        locShadowRays = Raylib.GetShaderLocation(worldShader, "shadowRays[0]");
+        locInvViewport = Raylib.GetShaderLocation(worldShader, "invViewport");
         material.Shader = worldShader;
         // DrawMesh сам привяжет эти текстуры к texture0 / texture1
         material.Maps[(int)MaterialMapIndex.Metalness].Texture = occTex;
@@ -508,8 +651,8 @@ internal static unsafe partial class Program
         float day = SmoothStep(-0.05f, 0.25f, e);         // 0 ночью, 1 днём
         float warm = 1f - SmoothStep(0.05f, 0.45f, e);    // 1 у горизонта (рассвет / закат)
 
-        sunColor = Vector3.Lerp(new Vector3(1.00f, 0.96f, 0.88f), new Vector3(1.00f, 0.52f, 0.25f), warm) * (0.85f * day);
-        ambientColor = Vector3.Lerp(new Vector3(0.14f, 0.16f, 0.28f), new Vector3(0.38f, 0.42f, 0.50f), day);
+        sunColor = Vector3.Lerp(new Vector3(1.00f, 0.96f, 0.88f), new Vector3(1.00f, 0.52f, 0.25f), warm) * (0.62f * day);
+        ambientColor = Vector3.Lerp(new Vector3(0.14f, 0.16f, 0.28f), new Vector3(0.34f, 0.38f, 0.45f), day);
 
         Vector3 sky = Vector3.Lerp(new Vector3(0.03f, 0.04f, 0.10f), new Vector3(0.53f, 0.81f, 0.92f), day);
         float glow = MathF.Max(0f, 1f - MathF.Abs(e) / 0.3f) * 0.55f;
@@ -517,9 +660,52 @@ internal static unsafe partial class Program
         skyColor = Col((int)(sky.X * 255f), (int)(sky.Y * 255f), (int)(sky.Z * 255f));
     }
 
+    static Vector3 InverseShadowRay(Vector3 ray)
+    {
+        static float Inverse(float component) =>
+            1f / (MathF.Abs(component) < 1e-5f ? (component < 0f ? -1e-5f : 1e-5f) : component);
+        return new Vector3(Inverse(ray.X), Inverse(ray.Y), Inverse(ray.Z));
+    }
+
+    static void ApplyShadowRays()
+    {
+        if (!shadowsOn || locShadowRays < 0) return;
+        Vector3* rays = stackalloc Vector3[4];
+        rays[0] = InverseShadowRay(sunDir);
+        int count = 1;
+        if (softShadows)
+        {
+            Vector3 tangent = Vector3.Normalize(Vector3.Cross(sunDir, MathF.Abs(sunDir.Y) < 0.95f ? Vector3.UnitY : Vector3.UnitX));
+            Vector3 bitangent = Vector3.Cross(sunDir, tangent);
+            const float radius = 0.025f;
+            rays[1] = InverseShadowRay(Vector3.Normalize(sunDir + radius * tangent));
+            rays[2] = InverseShadowRay(Vector3.Normalize(sunDir + radius * (-0.5f * tangent + 0.8660254f * bitangent)));
+            rays[3] = InverseShadowRay(Vector3.Normalize(sunDir + radius * (-0.5f * tangent - 0.8660254f * bitangent)));
+            count = 4;
+        }
+        Raylib.SetShaderValueV(worldShader, locShadowRays, rays, ShaderUniformDataType.Vec3, count);
+        int height = shadowHeight;
+        Raylib.SetShaderValue(worldShader, locShadowHeight, &height, ShaderUniformDataType.Int);
+    }
+
+    static double shaderAnimationTime, lastLightingTime;
+
+    static float AdvanceShaderAnimation(double now, bool freeze)
+    {
+        if (!freeze) shaderAnimationTime += now - lastLightingTime;
+        lastLightingTime = now;
+        return (float)shaderAnimationTime;
+    }
+
     static void ApplyLighting()
     {
         if (!shaderOk) return;
+        ApplyShadowRays();
+        if (locInvViewport >= 0)
+        {
+            Vector2 invViewport = new(1f / Raylib.GetRenderWidth(), 1f / Raylib.GetRenderHeight());
+            Raylib.SetShaderValue(worldShader, locInvViewport, &invViewport, ShaderUniformDataType.Vec2);
+        }
         Vector3 eye = pos + new Vector3(0,EyeHeight,0);
         Vector3 fog = new(skyColor.R/255f,skyColor.G/255f,skyColor.B/255f);
         float soft = softShadows ? 1 : 0;
@@ -531,7 +717,7 @@ internal static unsafe partial class Program
         float fFar = renderRadius * ChunkSize - 4.0f;
         Raylib.SetShaderValue(worldShader, locFogNear, &fNear, ShaderUniformDataType.Float);
         Raylib.SetShaderValue(worldShader, locFogFar, &fFar, ShaderUniformDataType.Float);
-        float gt = (float)Raylib.GetTime();
+        float gt = AdvanceShaderAnimation(Raylib.GetTime(), timePaused || paused || inventoryOpen);
         if (locGameTime != -1)
             Raylib.SetShaderValue(worldShader, locGameTime, &gt, ShaderUniformDataType.Float);
         Vector3 origin = new(occX, 0, occZ);
@@ -600,14 +786,16 @@ internal static unsafe partial class Program
         DrawCelestials(cam, look);       // солнце и луна
 
         Raylib.BeginMode3D(cam);
+        var centerChunk = PlayerChunk;
+        float chunkHalfDepth = (MathF.Abs(look.X) + MathF.Abs(look.Z)) * (ChunkSize / 2f)
+            + MathF.Abs(look.Y) * (H / 2f);
         foreach (var chunk in chunks.Values)
         {
-            if (!chunk.HasMesh || ChunkDistance((chunk.X,chunk.Z)) > renderRadius) continue;
+            if (chunk.Meshes is not { Count: > 0 } || ChunkDistance((chunk.X, chunk.Z), centerChunk) > renderRadius) continue;
             Vector3 center = new Vector3(chunk.X * ChunkSize + ChunkSize / 2f, H / 2f,
                                          chunk.Z * ChunkSize + ChunkSize / 2f) - cam.Position;
-            // Для чанка 16x16 радиус описанной сферы ~19.6, порог отсечения увеличен до -24f
-            if (Vector3.Dot(center, look) < -24f) continue;
-            Raylib.DrawMesh(chunk.Mesh, material, Matrix4x4.Identity);
+            if (Vector3.Dot(center, look) + chunkHalfDepth < 0f) continue;
+            foreach (var mesh in chunk.Meshes) Raylib.DrawMesh(mesh, material, Matrix4x4.Identity);
         }
         if (hasHit)   // подсветка блока под прицелом
             Raylib.DrawCubeWiresV(new Vector3(hitX + 0.5f, hitY + 0.5f, hitZ + 0.5f),

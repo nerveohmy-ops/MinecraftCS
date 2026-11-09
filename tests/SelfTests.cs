@@ -8,7 +8,7 @@ internal static unsafe partial class Program
         int count=0;
         void Check(bool ok,string name) { if (!ok) throw new InvalidOperationException(name); Console.WriteLine("PASS: "+name); count++; }
         // Проверка корректности маппинга отрицательных координат для размера чанка ChunkSize
-        Check(FloorChunk(-1)==-1 && FloorChunk(-ChunkSize)==-1 && FloorChunk(-ChunkSize-1)==-2 && Mod(-1,ChunkSize)==ChunkSize-1,"Negative coordinate mapping");
+        Check(FloorChunk(-1)==-1 && FloorChunk(-ChunkSize)==-1 && FloorChunk(-ChunkSize-1)==-2 && ChunkLocal(-1)==ChunkSize-1,"Negative coordinate mapping");
         GenerateWorld(); SpawnPlayer();
         Check(!Collides(),"Spawn clear");
         Check(H == 64 && pos.Y > 32, "World has room beneath the surface");
@@ -72,6 +72,37 @@ internal static unsafe partial class Program
                 Get(2 - size, AddedDepth + 5, 2 - size) == Air,
                 $"Legacy {size}x{size} chunk keeps placed and removed blocks");
         }
+        // A missing 8x8 quadrant must retain generated terrain at both coordinate signs.
+        foreach (int cx in new[] { -1, 0 })
+        {
+            int x = cx * ChunkSize, z = x;
+            GenerateChunk(cx, cx);
+            // Obtain a clean procedural reference even if an earlier test loaded a legacy chunk.
+            savedChunks.Remove((cx, cx));
+            chunks.Remove((cx, cx));
+            GenerateChunk(cx, cx);
+            var baseline = (byte[])chunks[(cx, cx)].Blocks.Clone();
+            var old = new SavedWorld
+            {
+                Version = 3, X = x, Y = 24, Z = z,
+                Chunks = new() { new ChunkSave { X = cx * 2, Z = cx * 2, Blocks = new byte[8 * 8 * LegacyHeight] } }
+            };
+            old.Chunks[0].Blocks[1] = Bricks;
+            RestoreWorld(old);
+            Check(baseline[LocalIndex(x + 2, AddedDepth, z)] != Air &&
+                Get(x + 1, AddedDepth, z) == Bricks && Get(x + 2, AddedDepth, z) == Air,
+                $"Legacy quadrant keeps edits and explicit air ({cx})");
+            Check(Enumerable.Range(AddedDepth, LegacyHeight).All(y =>
+                Get(x + 9, y, z) == baseline[LocalIndex(x + 9, y, z)]),
+                $"Missing legacy quadrant matches generation ({cx})");
+            old.Chunks.Add(new ChunkSave { X = cx * 2 + 1, Z = cx * 2, Blocks = new byte[8 * 8 * LegacyHeight] });
+            old.Chunks[1].Blocks[2] = Wood;
+            RestoreWorld(old);
+            Check(Get(x + 1, AddedDepth, z) == Bricks && Get(x + 10, AddedDepth, z) == Wood &&
+                Get(x + 9, AddedDepth, z) == Air &&
+                Get(x, AddedDepth, z + 9) == baseline[LocalIndex(x, AddedDepth, z + 9)],
+                $"Multiple legacy quadrants share one procedural base ({cx})");
+        }
         chunks.Clear(); savedChunks.Clear();
         GenerateChunk(0,0); Array.Clear(chunks[(0,0)].Blocks);
         pos=new Vector3(2.5f,1,2.5f); crouching=true;
@@ -82,17 +113,21 @@ internal static unsafe partial class Program
         Check(Collides(),"Standing detects ceiling");
         PickBlock(Bricks); Check(Hotbar[selected]==Bricks,"Pick block");
         occX=-48; occZ=-48; BuildOccupancy();
-        int offset=((2-occZ)*OccW+(2-occX)+W*2)*4;
+        int offset = OccupancyIndex(2 - occX, 2, 2 - occZ);
         Check(occ[offset]==255,"Moving shadow window handles world offsets");
         SetBlock(2, AddedDepth + 2, 2, Stone);
-        int upperOffset = offset + D * OccW * 4;
+        int upperOffset = OccupancyIndex(2 - occX, AddedDepth + 2, 2 - occZ);
         Check(occ[upperOffset] == 255, "Upper shadow layer tracks tall-world blocks");
         Array.Clear(chunks[(0,0)].Blocks);
-        Check(VertexAO(2,0,2,2,0)==255,"Open face has no baked occlusion");
+        int above = MeshBlockIndex(2, 1, 2);
+        PrepareMeshBlocks(0, 0);
+        Check(VertexAO(above, 2, 0)==255,"Open face has no baked occlusion");
         SetBlock(1,1,2,Stone);
-        Check(VertexAO(2,0,2,2,0)==214,"One neighboring side darkens corner");
+        PrepareMeshBlocks(0, 0);
+        Check(VertexAO(above, 2, 0)==214,"One neighboring side darkens corner");
         SetBlock(2,1,3,Stone);
-        Check(VertexAO(2,0,2,2,0)==122,"Two neighboring sides fully occlude corner");
+        PrepareMeshBlocks(0, 0);
+        Check(VertexAO(above, 2, 0)==122,"Two neighboring sides fully occlude corner");
         Check(ParseLobbyArgument(new[]{"--gpu-ready","+connect_lobby","109775241234567890"}) == 109775241234567890UL,"Steam launch lobby argument");
         Check(ParseLobbyArgument(new[]{"+connect_lobby","oops"}) == 0,"Malformed Steam lobby argument rejected");
         Check(ValidCoopInput(127,0,0,8) && !ValidCoopInput(128,0,0,8) &&
@@ -104,7 +139,225 @@ internal static unsafe partial class Program
         ResetFriendModel();
         Check(!modelReady && modelStride == 0 && friendSwing == 0,"Coop model pose resets between sessions");
         Check(MathF.Abs(SkinPixel * 32 - 1.8f) < 0.001f,"Coop model matches standing player height");
+        TestWorldStorage(Check);
+        TestGuestWorldStorage(Check);
+        TestChunkGeometry(Check);
+        TestOccupancyEviction(Check);
+        TestChunkNeighborhood(Check);
+        TestShadowHeight(Check);
+        Check(AdvanceShaderAnimation(1, freeze: false) == 1f &&
+            AdvanceShaderAnimation(10, freeze: true) == 1f &&
+            AdvanceShaderAnimation(11, freeze: true) == 1f &&
+            AdvanceShaderAnimation(12, freeze: false) == 2f,
+            "Paused shader animation resumes without jumping");
         Console.WriteLine($"{count} checks passed");
+    }
+
+    static SavedWorld TestWorld() => new()
+    {
+        Version = 3, Height = H, Chunks = new(), X = 96.5f, Y = H + 1, Z = 96.5f
+    };
+
+    static DirectoryInfo CreateSaveTestDirectory() =>
+        Directory.CreateDirectory(Path.Combine(AppContext.BaseDirectory, "save-test-" + Guid.NewGuid().ToString("N")));
+
+    static void TestWorldStorage(Action<bool, string> check)
+    {
+        var folder = CreateSaveTestDirectory();
+        try
+        {
+            string path = Path.Combine(folder.FullName, "world.json");
+            string backup = path + ".bak";
+            var initial = TestWorld();
+            var next = TestWorld();
+            next.Time = 0.5f;
+
+            foreach (bool mainPresent in new[] { true, false })
+            {
+                if (mainPresent) File.WriteAllText(path, "broken JSON");
+                else File.Delete(path);
+                string goodBackup = JsonSerializer.Serialize(initial);
+                File.WriteAllText(backup, goodBackup);
+
+                var storage = new WorldStorage(path);
+                string label = mainPresent ? "corrupt primary" : "missing primary";
+                check(storage.Read()?.Time == initial.Time && storage.Recovered && !storage.Blocked,
+                    $"Backup loads with {label}");
+                check(storage.TryWrite(next, out _) && File.ReadAllText(backup) == goodBackup &&
+                    new WorldStorage(path).Read()?.Time == next.Time, $"First write preserves backup with {label}");
+                check(storage.TryWrite(initial, out _) &&
+                    JsonSerializer.Deserialize<SavedWorld>(File.ReadAllText(backup))?.Time == next.Time,
+                    $"Subsequent write rotates the valid primary with {label}");
+            }
+
+            const string badPrimary = "{\"Version\":99}", badBackup = "broken backup";
+            File.WriteAllText(path, badPrimary);
+            File.WriteAllText(backup, badBackup);
+            var blocked = new WorldStorage(path);
+            check(blocked.Read() == null && blocked.Blocked && !blocked.TryWrite(next, out _) &&
+                File.ReadAllText(path) == badPrimary && File.ReadAllText(backup) == badBackup,
+                "Two unreadable copies block writes and are preserved");
+
+            File.Delete(path);
+            File.Delete(backup);
+            var fresh = new WorldStorage(path);
+            check(fresh.Read() == null && !fresh.Blocked && fresh.TryWrite(next, out _) && File.Exists(path),
+                "No save files permits creating a world");
+        }
+        finally { folder.Delete(recursive: true); }
+    }
+
+    static void TestGuestWorldStorage(Action<bool, string> check)
+    {
+        var folder = CreateSaveTestDirectory();
+        try
+        {
+            string path = Path.Combine(folder.FullName, "world.json");
+            var storage = new WorldStorage(path);
+            RestoreWorld(TestWorld());
+            const int x = 96, y = H - 1, z = 96;
+            check(TrySaveActiveWorld(storage, out _), "Initial solo save before joining");
+            SetBlock(x, y, z, Bricks);
+            var guest = TestWorld();
+
+            Directory.CreateDirectory(path + ".tmp");
+            check(!TryEnterGuestWorld(guest, storage, out string error) && error != null &&
+                soloWorld == null && Get(x, y, z) == Bricks && storage.Read()?.Chunks.Count == 0,
+                "Guest entry refused on write failure without losing live solo edits");
+            Directory.Delete(path + ".tmp");
+
+            check(TryEnterGuestWorld(guest, storage, out _) && Get(x, y, z) == Air,
+                "Guest entry saves solo edits before switching");
+            SetBlock(x + 1, y, z, Wood);
+            check(!TrySaveActiveWorld(storage, out _), "Guest world excluded from normal and shutdown saves");
+            LeaveGuestWorld(closing: true);
+            RestoreWorld(new WorldStorage(path).Read());
+            check(Get(x, y, z) == Bricks && Get(x + 1, y, z) == Air,
+                "Reload after guest shutdown retains only the solo edit");
+
+            check(TryEnterGuestWorld(guest, storage, out _), "Guest re-entry for leave and disconnect");
+            SetBlock(x + 1, y, z, Wood);
+            LeaveGuestWorld(closing: false);
+            check(soloWorld == null && Get(x, y, z) == Bricks && Get(x + 1, y, z) == Air,
+                "Shared leave and disconnect path restores solo world");
+            coopHost = coopMatched = true;
+            SetBlock(x + 1, y, z, Wood);
+            check(TrySaveActiveWorld(storage, out _), "Host can still save its active world");
+            coopHost = coopMatched = false;
+            RestoreWorld(new WorldStorage(path).Read());
+            check(Get(x + 1, y, z) == Wood, "Host edit persists");
+        }
+        finally { folder.Delete(recursive: true); }
+    }
+
+    static void TestChunkGeometry(Action<bool, string> check)
+    {
+        chunks.Clear();
+        var chunk = new Chunk { Blocks = new byte[ChunkSize * ChunkSize * H] };
+        chunks[(0, 0)] = chunk;
+        int parts = 0, faces = 0;
+        bool valid = true;
+        bool Count(int vertices, ReadOnlySpan<ushort> indices)
+        {
+            parts++;
+            faces += indices.Length / 6;
+            valid &= vertices <= MaxVertsPerMesh && vertices % 4 == 0 &&
+                indices.Length == vertices / 4 * 6 &&
+                vBuf.Count == vertices * 3 && uvBuf.Count == vertices * 2 &&
+                nBuf.Count == vertices * 3 && aoBuf.Count == vertices * 4;
+            foreach (ushort index in indices) valid &= index < vertices;
+            return true;
+        }
+
+        check(BuildChunkGeometry(0, 0, Count) && parts == 0, "Empty chunk emits no mesh");
+        chunk.Blocks[LocalIndex(ChunkSize - 1, 2, 0)] = Stone;
+        check(BuildChunkGeometry(0, 0, Count) && parts == 1 && faces == 6 && valid,
+            "Single block emits one indexed mesh");
+        var neighbor = new Chunk { X = 1, Blocks = new byte[chunk.Blocks.Length] };
+        neighbor.Blocks[LocalIndex(ChunkSize, 2, 0)] = Stone;
+        chunks[(1, 0)] = neighbor;
+        parts = faces = 0;
+        check(BuildChunkGeometry(0, 0, Count) && parts == 1 && faces == 5 && valid,
+            "Solid neighbor hides the shared chunk-border face");
+        chunks.Remove((1, 0));
+        var diagonal = new Chunk { X = 1, Z = 1, Blocks = new byte[chunk.Blocks.Length] };
+        diagonal.Blocks[LocalIndex(ChunkSize, 3, ChunkSize)] = Stone;
+        chunks[(1, 1)] = diagonal;
+        PrepareMeshBlocks(0, 0);
+        check(VertexAO(MeshBlockIndex(ChunkSize - 1, 3, ChunkSize - 1), 2, 1) == 214,
+            "Mesh halo includes the diagonal neighbor for corner AO");
+        chunks.Remove((1, 1));
+        parts = faces = 0;
+        check(BuildChunkGeometry(0, 0, Count) && parts == 1 && faces == 6 && valid,
+            "Mesh halo forgets a neighbor after eviction");
+
+        for (int y = 0; y < H; y++)
+        for (int z = 0; z < ChunkSize; z++)
+        for (int x = 0; x < ChunkSize; x++)
+            chunk.Blocks[LocalIndex(x, y, z)] = ((x + y + z) & 1) == 0 ? Stone : Air;
+
+        parts = faces = 0;
+        int expectedFaces = chunk.Blocks.Length / 2 * 6;
+        check(BuildChunkGeometry(0, 0, Count) && parts > 1 && faces == expectedFaces && valid,
+            "Dense checkerboard splits into valid indexed parts without missing faces");
+    }
+
+    static void TestOccupancyEviction(Action<bool, string> check)
+    {
+        chunks.Clear();
+        savedChunks.Clear();
+        pos = new Vector3(96.5f, 48, 96.5f);
+        int originalRadius = renderRadius;
+        renderRadius = MinRenderRadius;
+        UpdateOccupancyOrigin();
+        int x = ChunkSize, z = 6 * ChunkSize;
+        GenerateChunk(1, 6);
+        SetBlock(x, H - 1, z, Stone);
+        int offset = OccupancyIndex(x - occX, H - 1, z - occZ);
+        check(occ[offset] == 255, "Loaded chunk populates shadow occupancy");
+        StreamChunks();
+        check(!chunks.ContainsKey((1, 6)) && occ[offset] == 0,
+            "Eviction inside the shadow window removes stale occupancy");
+        renderRadius = originalRadius;
+    }
+
+    static void TestChunkNeighborhood(Action<bool, string> check)
+    {
+        pos = new Vector3(-0.25f, 48, -16.25f);
+        var center = PlayerChunk;
+        int radius = MaxRenderRadius;
+        var expected =
+            from x in Enumerable.Range(center.X - radius, radius * 2 + 1)
+            from z in Enumerable.Range(center.Z - radius, radius * 2 + 1)
+            orderby Math.Max(Math.Abs(x - center.X), Math.Abs(z - center.Z))
+            select (x, z);
+        check(center == (-1, -2) && NearbyChunkIndices(radius).SequenceEqual(expected),
+            "Cached chunk order matches distance priority at negative coordinates");
+
+        chunks.Clear();
+        savedChunks.Clear();
+        GenerateChunk(-1, -1);
+        GenerateChunk(0, -1);
+        GenerateChunk(-1, 0);
+        GenerateChunk(0, 0);
+        foreach (var chunk in chunks.Values) chunk.Dirty = false;
+        SetBlock(-2, H - 1, -2, Bricks);
+        check(chunks.Where(pair => pair.Value.Dirty).Select(pair => pair.Key).SequenceEqual(new[] { (-1, -1) }),
+            "Interior block edit only dirties its own chunk");
+        SetBlock(-1, H - 1, -1, Bricks);
+        check(chunks.Values.All(chunk => chunk.Dirty),
+            "Corner block edit dirties all chunks that sample its geometry or AO");
+    }
+
+    static void TestShadowHeight(Action<bool, string> check)
+    {
+        Array.Clear(occ);
+        check(FindShadowHeight() == 0, "Empty shadow map has no occupied height");
+        SetOcc(occX, 12, occZ, true);
+        SetOcc(occX + W - 1, H - 1, occZ + D - 1, true);
+        check(FindShadowHeight() == H, "Shadow bound includes the top voxel of the farthest column");
+        SetOcc(occX + W - 1, H - 1, occZ + D - 1, false);
+        check(FindShadowHeight() == 13, "Shadow bound falls after the highest voxel is removed");
     }
 }
 

@@ -6,11 +6,10 @@ namespace MinecraftCS;
 
 internal static unsafe partial class Program
 {
-    static bool saveBlocked;
     static float autosaveTimer;
     static double statusUntil;
     static string status = "";
-    static readonly string SavePath = Path.Combine(AppContext.BaseDirectory, "saves", "world.json");
+    static readonly WorldStorage worldStorage = new(Path.Combine(AppContext.BaseDirectory, "saves", "world.json"));
     internal sealed class ChunkSave
     {
         public int X { get; set; }
@@ -61,12 +60,7 @@ internal static unsafe partial class Program
     {
         if (savedChunks.TryGetValue((cx, cz), out var existing)) return existing;
 
-        byte[] blocks = new byte[ChunkSize * ChunkSize * H];
-        for (int y = 0; y < AddedDepth; y++)
-        for (int z = 0; z < ChunkSize; z++)
-        for (int x = 0; x < ChunkSize; x++)
-            blocks[x + ChunkSize * (z + ChunkSize * y)] =
-                UndergroundBlock(cx * ChunkSize + x, y, cz * ChunkSize + z);
+        byte[] blocks = GenerateChunkBlocks(cx, cz);
         savedChunks[(cx, cz)] = blocks;
         return blocks;
     }
@@ -113,30 +107,100 @@ internal static unsafe partial class Program
                         blocks, LocalIndex(0, y + AddedDepth, z), ChunkSize);
             }
         }
-        chunks.Clear(); // Called before mesh creation.
+        foreach (var chunk in chunks.Values) UnloadChunkMeshes(chunk);
+        chunks.Clear();
         pos = new Vector3(saved.X, saved.Y + (legacy ? AddedDepth : 0), saved.Z);
         yaw=saved.Yaw; pitch=saved.Pitch; timeOfDay=saved.Time;
         selected=saved.Selected; flying=saved.Flying; crouching=saved.Crouching;
         foreach (var key in NearbyChunkIndices(1)) GenerateChunk(key.X,key.Z);
         if (Collides()) { GenerateChunk(ChunksX/2, ChunksZ/2); SpawnPlayer(); }
     }
-    static void LoadWorld()
+    sealed class WorldStorage(string path)
     {
-        if (!File.Exists(SavePath)) return;
-        try
+        readonly string backup = path + ".bak";
+        bool preserveBackup;
+        public bool Blocked { get; private set; }
+        public bool Recovered => preserveBackup;
+
+        static SavedWorld TryRead(string candidate, out bool unreadable)
         {
-            var saved = JsonSerializer.Deserialize<SavedWorld>(File.ReadAllText(SavePath));
-            if (!ValidSave(saved)) throw new InvalidDataException("Invalid world data");
-            RestoreWorld(saved);
-            ShowStatus("World loaded");
+            unreadable = false;
+            try
+            {
+                using var stream = File.OpenRead(candidate);
+                var saved = JsonSerializer.Deserialize<SavedWorld>(stream);
+                if (ValidSave(saved)) return saved;
+                Console.Error.WriteLine($"Invalid world data: {candidate}");
+            }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            { Console.Error.WriteLine(ex.Message); }
+            unreadable = true;
+            return null;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+
+        public SavedWorld Read()
         {
-            saveBlocked=true;
-            ShowStatus("Save unreadable - original preserved");
-            Console.Error.WriteLine(ex.Message);
+            Blocked = preserveBackup = false;
+            var saved = TryRead(path, out bool mainUnreadable);
+            if (saved != null) return saved;
+
+            saved = TryRead(backup, out bool backupUnreadable);
+            preserveBackup = saved != null;
+            Blocked = saved == null && (mainUnreadable || backupUnreadable);
+            return saved;
+        }
+
+        public bool TryWrite(SavedWorld saved, out string error)
+        {
+            if (Blocked)
+            {
+                error = "No readable world save. Existing files were preserved.";
+                return false;
+            }
+            if (!ValidSave(saved))
+            {
+                error = "World state is invalid.";
+                return false;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                string temporary = path + ".tmp";
+                using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    JsonSerializer.Serialize(stream, saved);
+                    stream.Flush(true);
+                }
+                // Do not rotate the broken primary over the backup that was just recovered.
+                if (File.Exists(path)) File.Replace(temporary, path, preserveBackup ? null : backup);
+                else File.Move(temporary, path);
+                preserveBackup = false;
+                error = null;
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine(ex.Message);
+                error = "Could not write world save. See console.";
+                return false;
+            }
         }
     }
+
+    static void LoadWorld()
+    {
+        var saved = worldStorage.Read();
+        if (saved != null)
+        {
+            RestoreWorld(saved);
+            ShowStatus(worldStorage.Recovered ? "World loaded from backup" : "World loaded");
+        }
+        else if (worldStorage.Blocked) ShowStatus("World saves unreadable - files preserved");
+    }
+
     static SavedWorld CaptureWorld()
     {
         foreach (var c in chunks.Values.Where(c => c.Modified)) savedChunks[(c.X,c.Z)] = (byte[])c.Blocks.Clone();
@@ -146,22 +210,15 @@ internal static unsafe partial class Program
             X=pos.X,Y=pos.Y,Z=pos.Z,Yaw=yaw,Pitch=pitch,Time=timeOfDay,Selected=selected,Flying=flying,Crouching=crouching
         };
     }
+    static bool TrySaveActiveWorld(WorldStorage storage, out string error)
+    {
+        error = null;
+        return soloWorld == null && storage.TryWrite(CaptureWorld(), out error);
+    }
+
     static void SaveWorld()
     {
-        if (soloWorld != null) return;
-        if (saveBlocked) { ShowStatus("Saving disabled: preserve unreadable world.json"); return; }
-        try
-        {
-            var saved=CaptureWorld();
-            Directory.CreateDirectory(Path.GetDirectoryName(SavePath)!);
-            string temporary=SavePath+".tmp";
-            using (var stream=new FileStream(temporary,FileMode.Create,FileAccess.Write,FileShare.None))
-            { JsonSerializer.Serialize(stream,saved); stream.Flush(true); }
-            if (File.Exists(SavePath)) File.Replace(temporary,SavePath,SavePath+".bak");
-            else File.Move(temporary,SavePath);
-            ShowStatus("World saved");
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        { ShowStatus("Save failed - see console"); Console.Error.WriteLine(ex.Message); }
+        if (TrySaveActiveWorld(worldStorage, out string error)) ShowStatus("World saved");
+        else if (error != null) ShowStatus(error);
     }
 }

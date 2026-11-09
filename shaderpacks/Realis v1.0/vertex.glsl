@@ -13,6 +13,7 @@ uniform float gameTime;
 
 out float fragAO;
 out vec3 fragPos;
+out vec3 shadowPos;
 out vec2 fragUV;
 flat out vec3 fragNormal;
 out float isFoliage;
@@ -37,6 +38,7 @@ void main()
     }
 
     fragPos = p;
+    shadowPos = vertexPosition;
     fragUV = vertexTexCoord;
     fragNormal = vertexNormal;
     fragAO = vertexColor.r;

@@ -165,7 +165,7 @@ internal static unsafe partial class Program
         int meshed = 0, pending = 0, modified = 0;
         foreach (var chunk in chunks.Values)
         {
-            if (chunk.HasMesh) meshed++;
+            if (chunk.Meshes is { Count: > 0 }) meshed++;
             if (chunk.Dirty) pending++;
             if (chunk.Modified) modified++;
         }
@@ -177,7 +177,7 @@ internal static unsafe partial class Program
         y += padding;
 
         Line($"XYZ: {pos.X:F2} / {pos.Y:F2} / {pos.Z:F2} | Block: {x}, {blockY}, {z}");
-        Line($"Chunk: {cx}, {cz} | Local X/Z: {Mod(x, ChunkSize)}, {Mod(z, ChunkSize)} | Borders: {(showChunkBorders ? "on" : "off")}");
+        Line($"Chunk: {cx}, {cz} | Local X/Z: {ChunkLocal(x)}, {ChunkLocal(z)} | Borders: {(showChunkBorders ? "on" : "off")}");
         string mode = flying ? "flying" : crouching ? "sneaking" : onGround ? "grounded" : "airborne";
         const float degreesPerRadian = 180f / MathF.PI;
         Line($"Player: {mode} | Speed: {vel.Length():F2} blocks/s | Yaw: {yaw * degreesPerRadian:F1} | Pitch: {pitch * degreesPerRadian:F1}");

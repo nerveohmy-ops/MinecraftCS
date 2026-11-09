@@ -215,7 +215,12 @@ internal static unsafe partial class Program
         InitLighting();
         InitShaderManager();
         RebuildDirtyChunks(int.MaxValue);
-        if (renderTest) { pitch = -0.65f; shadowsOn = benchmark; }
+        if (renderTest)
+        {
+            pitch = -0.65f;
+            shadowsOn = benchmark;
+            timePaused = true;
+        }
         if (benchmark)
         {
             foreach (var key in NearbyChunkIndices(renderRadius)) GenerateChunk(key.X,key.Z);
@@ -251,7 +256,7 @@ internal static unsafe partial class Program
             {
                 Raylib.TakeScreenshot(Path.Combine(Environment.CurrentDirectory,"lighting-preview.png"));
                 if (benchmark) Console.WriteLine($"BENCHMARK: {benchSeconds * 1000 / benchFrames:F2} ms/frame, {benchFrames / benchSeconds:F1} FPS");
-                Console.WriteLine($"RENDER CHECK: shader={shaderOk}, GPU={gpuName}");
+                Console.WriteLine($"RENDER CHECK: shader={shaderOk}, pack={currentShaderPack}, GPU={gpuName}, fullscreen={Raylib.IsWindowFullscreen()}, resolution={Raylib.GetRenderWidth()}x{Raylib.GetRenderHeight()}");
                 if (!shaderOk) Environment.ExitCode = 1;
                 break;
             }
@@ -268,7 +273,7 @@ internal static unsafe partial class Program
             Steamworks.SteamAPI.Shutdown();
         }
         foreach (var chunk in chunks.Values)
-            if (chunk.HasMesh) Raylib.UnloadMesh(chunk.Mesh);
+            UnloadChunkMeshes(chunk);
         Raylib.UnloadTexture(atlas);
         Raylib.UnloadTexture(occTex);
         if (dirtUiLoaded) Raylib.UnloadTexture(dirtUiTex);

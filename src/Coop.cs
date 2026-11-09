@@ -277,8 +277,8 @@ internal static unsafe partial class Program
             case "start" when incomingWorld != null:
                 if (!ValidSave(incomingWorld) || !ValidPlayer(p.Host))
                 { EndCoop("Invalid world snapshot."); break; }
-                soloWorld = CaptureWorld();
-                ReplaceCoopWorld(incomingWorld);
+                if (!TryEnterGuestWorld(incomingWorld, worldStorage, out string error))
+                { EndCoop($"Cannot join: {error}"); break; }
                 incomingWorld = null;
                 friend = p.Host;
                 coopMatched = true;
@@ -369,15 +369,29 @@ internal static unsafe partial class Program
         Raylib.DisableCursor();
     }
 
+    static bool TryEnterGuestWorld(SavedWorld world, WorldStorage storage, out string error)
+    {
+        var snapshot = CaptureWorld();
+        if (!storage.TryWrite(snapshot, out error)) return false;
+        soloWorld = snapshot;
+        ReplaceCoopWorld(world);
+        return true;
+    }
+
+    static void LeaveGuestWorld(bool closing)
+    {
+        if (soloWorld == null) return;
+        if (!closing) ReplaceCoopWorld(soloWorld);
+        soloWorld = null;
+    }
+
     static void ReplaceCoopWorld(SavedWorld world)
     {
-        foreach (var c in chunks.Values)
-            if (c.HasMesh) Raylib.UnloadMesh(c.Mesh);
         RestoreWorld(world);
         vel = Vector3.Zero;
         onGround = hasHit = false;
         BuildOccupancy();
-        FlushOccupancy();
+        if (occTex.Id != 0) FlushOccupancy();
     }
 
     static void EndCoop(string message, int reason = 0, bool closing = false)
@@ -398,11 +412,7 @@ internal static unsafe partial class Program
         coopSendFailed = false;
         createResult?.Cancel();
         joinResult?.Cancel();
-        if (soloWorld != null)
-        {
-            if (!closing) ReplaceCoopWorld(soloWorld);
-            soloWorld = null;
-        }
+        LeaveGuestWorld(closing);
         coopStatus = message;
         if (!closing)
         {
