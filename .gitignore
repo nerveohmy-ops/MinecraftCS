@@ -22,3 +22,4 @@ saves/
 *.bak
 *.tmp
 .tether
+screenshot*.png
