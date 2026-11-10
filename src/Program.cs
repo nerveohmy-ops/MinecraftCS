@@ -94,6 +94,7 @@ internal static unsafe partial class Program
     static void Update(float dt)
     {
         PollCoop(dt);
+        if (titleOpen) { UpdateTitle(); return; }
         if (coopPanel) { UpdateCoopMenu(); return; }
         if (shaderMenuOpen) { UpdateShaderMenu(); return; }
         if (Raylib.IsKeyPressed(KeyboardKey.F3)) debugHud = !debugHud;
@@ -112,7 +113,7 @@ internal static unsafe partial class Program
         {
             if (escape) SetPaused(false);
             else if (Raylib.IsKeyPressed(KeyboardKey.S)) OpenShaderMenu();
-            else if (Raylib.IsKeyPressed(KeyboardKey.M)) coopPanel = true;
+            else if (!survivalMode && Raylib.IsKeyPressed(KeyboardKey.M)) coopPanel = true;
             else if (Raylib.IsKeyPressed(KeyboardKey.Q)) quitRequested = true;
             return;
         }
@@ -159,17 +160,19 @@ internal static unsafe partial class Program
 
         Vector3 eye = new(pos.X, pos.Y + EyeHeight, pos.Z);
         hasHit = Raycast(eye, LookDir(), ReachDist);
+        bool attackedMob = AttackSurvivalMob(eye);
         if (hasHit && (!coopMatched || coopHost))
         {
             if (Raylib.IsMouseButtonPressed(MouseButton.Middle))
                 PickBlock(Get(hitX, hitY, hitZ));
-            if (Raylib.IsMouseButtonPressed(MouseButton.Left) && hitY > 0)
-                CommitCoopBlock(hitX, hitY, hitZ, Air);
+            if (!attackedMob && Raylib.IsMouseButtonPressed(MouseButton.Left) && hitY > 0)
+                SurvivalEdit(hitX, hitY, hitZ, Air);
             else if (Raylib.IsMouseButtonPressed(MouseButton.Right) &&
                      Get(prevX, prevY, prevZ) == Air && !IntersectsPlayer(prevX, prevY, prevZ))
-                CommitCoopBlock(prevX, prevY, prevZ, Hotbar[selected]);
+                SurvivalEdit(prevX, prevY, prevZ, Hotbar[selected]);
         }
 
+        UpdateSurvival(dt);
         RebuildDirtyChunks();
         FlushOccupancy();
     }
@@ -177,6 +180,13 @@ internal static unsafe partial class Program
     static void Main(string[] args)
     {
         if (args.Contains("--self-test")) { RunSelfTests(); return; }
+        bool filamentPreview = args.Contains("--filament") || args.Contains("--filament-test");
+        if (filamentPreview || args.Contains("--bgfx") || args.Contains("--bgfx-test"))
+        {
+            if (!args.Contains("--bgfx-test") && !args.Contains("--filament-test")) EnsureDiscreteGpu(args);
+            Environment.ExitCode = RunRenderPreview(args, filamentPreview);
+            return;
+        }
         if (args.Contains("--steam-check"))
         {
             InitCoop();
@@ -201,14 +211,23 @@ internal static unsafe partial class Program
         if (args.Contains("--fullscreen") || args.Contains("-f")) ToggleFullscreenMode();
 
         atlas = MakeAtlas();
+        LoadSurvivalTextures();
         material = Raylib.LoadMaterialDefault();
         material.Maps[(int)MaterialMapIndex.Albedo].Texture = atlas;
+        openGlBackend.SetWorldMaterial(material);
 
-        GenerateWorld();
-        SpawnPlayer();
-        if (!renderTest) LoadWorld();
-        foreach (var key in NearbyChunkIndices(2)) GenerateChunk(key.X, key.Z);
-        UpdateOccupancyOrigin();
+        if (renderTest)
+        {
+            GenerateWorld();
+            SpawnPlayer();
+            foreach (var key in NearbyChunkIndices(2)) GenerateChunk(key.X, key.Z);
+            UpdateOccupancyOrigin();
+        }
+        else
+        {
+            titleOpen = true;
+            RefreshWorldList();
+        }
         UpdateSun(0);
         BuildOccupancy();
         CreateOccupancyTexture();
@@ -228,16 +247,16 @@ internal static unsafe partial class Program
         }
         double benchSeconds = 0;
         int benchFrames = 0;
-        Raylib.DisableCursor();
+        if (renderTest) Raylib.DisableCursor();
 
         ulong launchLobby = ParseLobbyArgument(args);
-        if (!renderTest && launchLobby != 0)
+        if (!renderTest && launchLobby != 0 && OpenNamedWorld(legacyWorldPath, allowEmpty: true))
         {
             if (steamReady) JoinCoop(new Steamworks.CSteamID(launchLobby));
             else { paused = coopPanel = true; Raylib.EnableCursor(); }
         }
 #if STEAM_TEST
-        else if (!renderTest && args.Contains("--host-steam"))
+        else if (!renderTest && args.Contains("--host-steam") && OpenNamedWorld(legacyWorldPath, allowEmpty: true))
         {
             paused = coopPanel = true;
             Raylib.EnableCursor();
@@ -248,9 +267,13 @@ internal static unsafe partial class Program
         while (!Raylib.WindowShouldClose() && !quitRequested)
         {
             Update(MathF.Min(Raylib.GetFrameTime(), 0.05f));
-            UpdateAmbientAudio(MathF.Min(Raylib.GetFrameTime(), 0.05f));
-            UpdateGameplayAudio();
-            Draw();
+            if (titleOpen) DrawTitle();
+            else
+            {
+                UpdateAmbientAudio(MathF.Min(Raylib.GetFrameTime(), 0.05f));
+                UpdateGameplayAudio();
+                Draw();
+            }
             if (benchmark && frame > 60) { benchSeconds += Raylib.GetFrameTime(); benchFrames++; }
             if (renderTest && frame >= (benchmark ? 300 : 40))
             {
@@ -262,7 +285,7 @@ internal static unsafe partial class Program
             }
         }
 
-        if (!renderTest) SaveWorld();
+        if (!renderTest && !titleOpen) SaveWorld();
         if (steamReady)
         {
             EndCoop("", closing:true);
@@ -275,8 +298,10 @@ internal static unsafe partial class Program
         foreach (var chunk in chunks.Values)
             UnloadChunkMeshes(chunk);
         Raylib.UnloadTexture(atlas);
+        UnloadSurvivalTextures();
         Raylib.UnloadTexture(occTex);
         if (dirtUiLoaded) Raylib.UnloadTexture(dirtUiTex);
+        activeScreenChain?.Dispose();
         if (shaderOk) Raylib.UnloadShader(worldShader);
         Raylib.CloseWindow();
         CloseAmbientAudio();

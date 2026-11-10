@@ -23,7 +23,7 @@ void main()
     vec3 p = vertexPosition;
 
     // Определение листвы по UV атласа (тайл 7 = leaves)
-    float tile = floor(vertexTexCoord.x * 11.0);
+    float tile = floor(vertexTexCoord.x * @TILE_COUNT@.0);
     float foliage = (tile == 7.0) ? 1.0 : 0.0;
     isFoliage = foliage;
 

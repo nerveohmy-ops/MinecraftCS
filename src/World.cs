@@ -1,4 +1,4 @@
-using Raylib_cs;
+using MinecraftCS.Graphics;
 using System.Numerics;
 
 namespace MinecraftCS;
@@ -12,10 +12,11 @@ internal static unsafe partial class Program
     const int LegacyHeight = 32, H = 64;
     const int AddedDepth = H - LegacyHeight;
 
-    const byte Air = 0, Grass = 1, Dirt = 2, Stone = 3, Sand = 4, Wood = 5, Leaves = 6, Planks = 7, Bricks = 8, Cobblestone = 9;
+    const byte Air = 0, Grass = 1, Dirt = 2, Stone = 3, Sand = 4, Wood = 5, Leaves = 6, Planks = 7, Bricks = 8, Cobblestone = 9, CoalOre = 10, IronOre = 11, GoldOre = 12;
     const int SandLevel = 10 + AddedDepth;                   // ниже этой высоты — пляж (песок)
 
-    const uint Seed = 1337;
+    const uint DefaultSeed = 1337;
+    static uint Seed = DefaultSeed;
 
     // ════════════════════════ ШУМ (Value Noise) ════════════════════════
     static uint Hash(int x, int y, int z)
@@ -105,7 +106,7 @@ internal static unsafe partial class Program
     {
         public int X, Z;
         public byte[] Blocks;
-        public List<Mesh> Meshes;
+        public List<IRenderMesh> Meshes;
         public bool Dirty = true, Modified;
     }
     static readonly Dictionary<(int X, int Z), Chunk> chunks = new();
@@ -284,8 +285,12 @@ internal static unsafe partial class Program
         byte[] blocks = new byte[ChunkSize * ChunkSize * H];
         for (int y = 0; y < H; y++)
         for (int z = 0; z < ChunkSize; z++)
-            Array.Copy(target, Index(cx * ChunkSize, y, cz * ChunkSize + z),
-                blocks, ChunkSize * (z + ChunkSize * y), ChunkSize);
+        for (int x = 0; x < ChunkSize; x++)
+        {
+            int wx = cx * ChunkSize + x, wz = cz * ChunkSize + z;
+            byte block = target[Index(wx, y, wz)];
+            blocks[x + ChunkSize * (z + ChunkSize * y)] = block == Stone ? OreAt(wx, y, wz) : block;
+        }
         return blocks;
     }
 

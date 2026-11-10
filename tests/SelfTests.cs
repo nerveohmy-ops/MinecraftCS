@@ -150,6 +150,8 @@ internal static unsafe partial class Program
             AdvanceShaderAnimation(11, freeze: true) == 1f &&
             AdvanceShaderAnimation(12, freeze: false) == 2f,
             "Paused shader animation resumes without jumping");
+        TestSurvival(Check);
+        TestJavaShaderPacks(Check);
         Console.WriteLine($"{count} checks passed");
     }
 
@@ -358,6 +360,138 @@ internal static unsafe partial class Program
         check(FindShadowHeight() == H, "Shadow bound includes the top voxel of the farthest column");
         SetOcc(occX + W - 1, H - 1, occZ + D - 1, false);
         check(FindShadowHeight() == 13, "Shadow bound falls after the highest voxel is removed");
+    }
+
+    static void TestSurvival(Action<bool, string> check)
+    {
+        const uint seed = 421;
+        RestoreWorld(NewWorldState(seed, true));
+        byte[] terrain = GenerateChunkBlocks(6, 6);
+        check(terrain.Contains(CoalOre) && terrain.Contains(IronOre) && terrain.Contains(GoldOre),
+            "Seeded underground chunk contains all three ores");
+        check(terrain.SequenceEqual(GenerateChunkBlocks(6, 6)), "Ore generation is repeatable");
+        const int x = 96, y = H - 1, z = 96;
+        SetBlock(x, y, z, Wood);
+        SurvivalEdit(x, y, z, Air);
+        check(Get(x, y, z) == Air && items[Wood] == 1, "Survival mining collects the removed block");
+        check(TryCraft(recipes[0]) && items[Wood] == 0 && items[Planks] == 4 &&
+            !TryCraft(recipes[0]) && items[Planks] == 4,
+            "Crafting consumes inputs once and rejects missing materials");
+        SurvivalEdit(x, y, z, Planks);
+        check(Get(x, y, z) == Planks && items[Planks] == 3, "Survival placement spends one block");
+        SurvivalEdit(x + 1, y, z, Bricks);
+        check(Get(x + 1, y, z) == Air, "Survival placement requires inventory stock");
+
+        var folder = CreateSaveTestDirectory();
+        try
+        {
+            string path = Path.Combine(folder.FullName, "first.json");
+            string another = Path.Combine(folder.FullName, "second.json");
+            health = 13;
+            var storage = new WorldStorage(path);
+            check(storage.TryWrite(CaptureWorld(), out _, createOnly: true), "First named world saves");
+            RestoreWorld(NewWorldState(seed + 1, false));
+            check(!terrain.SequenceEqual(GenerateChunkBlocks(6, 6)) && !survivalMode && items[Planks] == 0,
+                "Changing worlds changes seed and resets survival state");
+            check(new WorldStorage(another).TryWrite(CaptureWorld(), out _, createOnly: true) &&
+                !storage.TryWrite(CaptureWorld(), out _, createOnly: true), "Named worlds cannot overwrite one another");
+            RestoreWorld(storage.Read());
+            check(survivalMode && Seed == seed && health == 13 && items[Planks] == 3 &&
+                Get(x, y, z) == Planks, "Survival seed, health, inventory and edits reload together");
+            check(ValidWorldName("New World-2") && !ValidWorldName("../world") &&
+                !ValidWorldName("world.json"), "World names cannot escape the save directory");
+        }
+        finally { folder.Delete(recursive: true); }
+    }
+
+    static void TestJavaShaderPacks(Action<bool, string> check)
+    {
+        const string root = "Wrapped/shaders/";
+        var files = new Dictionary<string, string>
+        {
+            [root + "gbuffers_terrain.vsh"] = "#version 120\nvoid main() { gl_Position = ftransform(); }",
+            [root + "gbuffers_terrain.fsh"] = "#version 120\n#include \"/lib/color.glsl\"\nvoid main() { gl_FragData[0] = tint; }",
+            [root + "lib/color.glsl"] = "const vec4 tint = vec4(1.0);"
+        };
+        var pack = ReadShaderEntries(files.Keys, file => files[file]);
+        check(pack.Java && pack.Vertex.StartsWith("#version 330 core") &&
+            !pack.Vertex.Contains("#version 120") && !pack.Fragment.Contains("#version 120") &&
+            pack.Fragment.Contains("const vec4 tint") && pack.Fragment.Contains("javaFragment = tint"),
+            "Wrapped Java pack adapts terrain shaders and resolves absolute includes");
+
+        bool Rejects()
+        {
+            try { ReadShaderEntries(files.Keys, file => files[file]); return false; }
+            catch (InvalidDataException) { return true; }
+        }
+
+        const string post = "#version 120\nuniform sampler2D colortex0;\nvoid main() { gl_FragColor = texture2D(colortex0, gl_TexCoord[0].st); }";
+        files[root + "final.fsh"] = post + " // final pass";
+        pack = ReadShaderEntries(files.Keys, file => files[file]);
+        check(pack.Post is { Length: 1 } && pack.Post[0].Vertex.Contains("javaVertexMain") &&
+            pack.Post[0].Fragment.Contains("texture2D(texture0"), "Java final pass samples scene color");
+        files[root + "composite.fsh"] = post + " // base pass";
+        files[root + "composite10.fsh"] = post + " // tenth pass";
+        files[root + "composite2.fsh"] = post + " // second pass";
+        pack = ReadShaderEntries(files.Keys, file => files[file]);
+        check(pack.Post.Length == 4 && pack.Post[0].Fragment.Contains("base pass") &&
+            pack.Post[1].Fragment.Contains("second pass") && pack.Post[2].Fragment.Contains("tenth pass") &&
+            pack.Post[3].Fragment.Contains("final pass"),
+            "Java composite passes use numeric order and final runs last");
+        files[root + "shadow.fsh"] = post;
+        check(Rejects(), "A Java pack requiring shadow passes is rejected");
+        files.Remove(root + "shadow.fsh");
+        files.Remove(root + "composite10.fsh");
+        files.Remove(root + "composite2.fsh");
+        files.Remove(root + "final.fsh");
+        pack = ReadShaderEntries(files.Keys, file => files[file]);
+        check(pack.Post is { Length: 1 }, "A single Java composite pass is accepted");
+        files[root + "composite.fsh"] = post.Replace("colortex0", "colortex1");
+        check(Rejects(), "A Java screen pass cannot read an unsupported color buffer");
+        string depthPass = post.Replace("colortex0", "depthtex0");
+        files[root + "composite.fsh"] = depthPass;
+        pack = ReadShaderEntries(files.Keys, file => files[file]);
+        check(pack.Post[0].Fragment.Contains("texture2D(javaSceneDepth"), "Screen pass can sample the scene depth texture");
+        files[root + "composite.fsh"] = depthPass.Replace("depthtex0", "gdepthtex");
+        pack = ReadShaderEntries(files.Keys, file => files[file]);
+        check(pack.Post[0].Fragment.Contains("texture2D(javaSceneDepth"), "Legacy gdepthtex aliases scene depth");
+        files[root + "composite.fsh"] = depthPass.Replace("depthtex0", "depthtex1");
+        check(Rejects(), "Java depth snapshots beyond depthtex0 are rejected");
+        files.Remove(root + "composite.fsh");
+        files[root + "lib/color.glsl"] = "#include \"../../outside.glsl\"";
+        check(Rejects(), "Java shader include cannot escape the shaders directory");
+        files[root + "lib/color.glsl"] = "#include \"/lib/color.glsl\"";
+        check(Rejects(), "Recursive Java shader include is rejected");
+        files[root + "lib/color.glsl"] = "const vec4 tint = vec4(1.0);";
+        files[root + "gbuffers_terrain.fsh"] = "#version 120\nvoid main() { gl_FragData[1] = vec4(1.0); }";
+        check(Rejects(), "Java shader cannot write unsupported render targets");
+
+        files[root + "world0/gbuffers_terrain.fsh"] = "#version 130\n#include \"/lib/color.glsl\"\nvoid main() { gl_FragColor = tint; }";
+        files[root + "world0/final.fsh"] = post + " // overworld final";
+        files[root + "final.fsh"] = post + " // fallback final";
+        files[root + "composite.fsh"] = post + " // fallback composite";
+        pack = ReadShaderEntries(files.Keys, file => files[file]);
+        check(pack.Fragment.Contains("const vec4 tint") && pack.Post.Length == 2 &&
+            pack.Post[0].Fragment.Contains("fallback composite") && pack.Post[1].Fragment.Contains("overworld final"),
+            "Overworld shader overrides use root includes and common passes");
+        files[root + "world0/deferred10.fsh"] = post + " // deferred ten";
+        files[root + "world0/deferred1.fsh"] = post + " // deferred one";
+        pack = ReadShaderEntries(files.Keys, file => files[file]);
+        check(pack.Post.Length == 4 && pack.Post[0].Fragment.Contains("deferred one") &&
+            pack.Post[1].Fragment.Contains("deferred ten") &&
+            pack.Post[2].Fragment.Contains("fallback composite") && pack.Post[3].Fragment.Contains("overworld final"),
+            "Java deferred passes run in numeric order before composite and final");
+        files[root + "world0/shadow.fsh"] = post;
+        files[root + "world0/shadowcomp.fsh"] = post;
+        try
+        {
+            ReadShaderEntries(files.Keys, file => files[file]);
+            check(false, "Overworld package reports unsupported pass names");
+        }
+        catch (InvalidDataException ex)
+        {
+            check(ex.Message.Contains("shadow, shadowcomp"), "Overworld package reports unsupported pass names");
+        }
     }
 }
 

@@ -158,7 +158,7 @@ internal static unsafe partial class Program
 
     static void UpdateMovementMode()
     {
-        if (Raylib.IsKeyPressed(KeyboardKey.F))
+        if (!survivalMode && Raylib.IsKeyPressed(KeyboardKey.F))
         {
             flying = !flying;
             vel = Vector3.Zero;

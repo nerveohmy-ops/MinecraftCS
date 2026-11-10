@@ -9,7 +9,7 @@ internal static unsafe partial class Program
     static float autosaveTimer;
     static double statusUntil;
     static string status = "";
-    static readonly WorldStorage worldStorage = new(Path.Combine(AppContext.BaseDirectory, "saves", "world.json"));
+    static WorldStorage worldStorage;
     internal sealed class ChunkSave
     {
         public int X { get; set; }
@@ -19,6 +19,10 @@ internal static unsafe partial class Program
     internal sealed class SavedWorld
     {
         public int Version { get; set; } = 1;
+        public uint Seed { get; set; } = DefaultSeed;
+        public bool Survival { get; set; }
+        public int Health { get; set; } = MaxHealth;
+        public int[] Items { get; set; }
         public int Width { get; set; }
         public int Height { get; set; }
         public int Depth { get; set; }
@@ -36,7 +40,7 @@ internal static unsafe partial class Program
         public bool Crouching { get; set; }
     }
     static void ShowStatus(string message) { status = message; statusUntil = Raylib.GetTime()+4; }
-    static bool ValidBlocks(byte[] data, int size) => data != null && data.Length == size && data.All(b => b <= Cobblestone);
+    static bool ValidBlocks(byte[] data, int size) => data != null && data.Length == size && data.All(b => b <= GoldOre);
     static bool ValidSave(SavedWorld s)
     {
         if (s == null || !float.IsFinite(s.X) || !float.IsFinite(s.Z) ||
@@ -44,6 +48,9 @@ internal static unsafe partial class Program
             !float.IsFinite(s.Y) || s.Y < 0 || s.Y > H+16 || !float.IsFinite(s.Yaw) ||
             !float.IsFinite(s.Pitch) || MathF.Abs(s.Pitch)>1.55f ||
             !float.IsFinite(s.Time) || s.Time<0 || s.Time>=1 || s.Selected<0 || s.Selected>=Hotbar.Length) return false;
+        if (s.Survival && (s.Version != 3 || s.Height != H ||
+            s.Health is < 1 or > MaxHealth || s.Items?.Length != ItemCount ||
+            s.Items.Any(count => count is < 0 or > MaxStack))) return false;
         if (s.Version == 3) return s.Chunks != null && s.Chunks.All(c => c != null &&
             Math.Abs((long)c.X) <= 12500000 && Math.Abs((long)c.Z) <= 12500000 &&
             (s.Height == H
@@ -73,6 +80,8 @@ internal static unsafe partial class Program
         ambientDelay = 15;
         ambientProbe = 0;
         ambientSheltered = false;
+        Seed = saved.Seed;
+        RestoreSurvival(saved);
         savedChunks.Clear();
         bool legacy = saved.Height != H;
         if (saved.Version == 3)
@@ -111,7 +120,7 @@ internal static unsafe partial class Program
         chunks.Clear();
         pos = new Vector3(saved.X, saved.Y + (legacy ? AddedDepth : 0), saved.Z);
         yaw=saved.Yaw; pitch=saved.Pitch; timeOfDay=saved.Time;
-        selected=saved.Selected; flying=saved.Flying; crouching=saved.Crouching;
+        selected=saved.Selected; flying=!survivalMode && saved.Flying; crouching=saved.Crouching;
         foreach (var key in NearbyChunkIndices(1)) GenerateChunk(key.X,key.Z);
         if (Collides()) { GenerateChunk(ChunksX/2, ChunksZ/2); SpawnPlayer(); }
     }
@@ -152,7 +161,7 @@ internal static unsafe partial class Program
             return saved;
         }
 
-        public bool TryWrite(SavedWorld saved, out string error)
+        public bool TryWrite(SavedWorld saved, out string error, bool createOnly = false)
         {
             if (Blocked)
             {
@@ -175,7 +184,7 @@ internal static unsafe partial class Program
                     stream.Flush(true);
                 }
                 // Do not rotate the broken primary over the backup that was just recovered.
-                if (File.Exists(path)) File.Replace(temporary, path, preserveBackup ? null : backup);
+                if (!createOnly && File.Exists(path)) File.Replace(temporary, path, preserveBackup ? null : backup);
                 else File.Move(temporary, path);
                 preserveBackup = false;
                 error = null;
@@ -190,22 +199,13 @@ internal static unsafe partial class Program
         }
     }
 
-    static void LoadWorld()
-    {
-        var saved = worldStorage.Read();
-        if (saved != null)
-        {
-            RestoreWorld(saved);
-            ShowStatus(worldStorage.Recovered ? "World loaded from backup" : "World loaded");
-        }
-        else if (worldStorage.Blocked) ShowStatus("World saves unreadable - files preserved");
-    }
-
     static SavedWorld CaptureWorld()
     {
         foreach (var c in chunks.Values.Where(c => c.Modified)) savedChunks[(c.X,c.Z)] = (byte[])c.Blocks.Clone();
         return new SavedWorld
         {
+            Seed=Seed, Survival=survivalMode, Health=health,
+            Items=survivalMode ? (int[])items.Clone() : null,
             Version=3, Height=H, Chunks=savedChunks.Select(p => new ChunkSave { X=p.Key.X,Z=p.Key.Z,Blocks=p.Value }).ToList(),
             X=pos.X,Y=pos.Y,Z=pos.Z,Yaw=yaw,Pitch=pitch,Time=timeOfDay,Selected=selected,Flying=flying,Crouching=crouching
         };

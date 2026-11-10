@@ -1,0 +1,13 @@
+material {
+    name : MinecraftCS_Terrain,
+    shadingModel : unlit,
+    requires : [ uv0, color ],
+    parameters : [{ type : sampler2d, name : atlas }]
+}
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        vec3 texel = texture(materialParams_atlas, getUV0()).rgb;
+        material.baseColor = vec4(texel * getColor().r, 1.0);
+    }
+}

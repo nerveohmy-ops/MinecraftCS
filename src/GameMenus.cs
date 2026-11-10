@@ -141,7 +141,7 @@ internal static unsafe partial class Program
                 Raylib.DrawRectangleLines(x - one, y0 - one, slot + 2 * one, slot + 2 * one, Col(255, 255, 255));
             }
         }
-        Raylib.DrawText($"Block: {BlockNames[selected]}", x0, y0 - S(26), S(20), Col(255, 255, 255));
+        Raylib.DrawText($"Block: {BlockNames[selected]}{(survivalMode ? $" x{items[Hotbar[selected]]}" : "")}", x0, y0 - S(26), S(20), Col(255, 255, 255));
 
         if (debugHud) DrawDebugHud(sw, sh, ui);
     }
@@ -184,8 +184,13 @@ internal static unsafe partial class Program
         string target = "none";
         if (hasHit)
         {
-            int slot = Array.IndexOf(Hotbar, Get(hitX, hitY, hitZ));
-            if (slot >= 0) target = $"{BlockNames[slot]} at {hitX}, {hitY}, {hitZ}";
+            byte block = Get(hitX, hitY, hitZ);
+            int slot = Array.IndexOf(Hotbar, block);
+            string name = slot >= 0 ? BlockNames[slot] : block switch
+            {
+                CoalOre => "Coal ore", IronOre => "Iron ore", GoldOre => "Gold ore", _ => "Air"
+            };
+            if (block != Air) target = $"{name} at {hitX}, {hitY}, {hitZ}";
         }
         Line($"Target: {target}");
         y += padding;
@@ -245,8 +250,9 @@ internal static unsafe partial class Program
             if (DrawMenuButton("Resume  [Esc]", PauseButton(0))) SetPaused(false);
             if (DrawMenuButton("Save world  [F5]", PauseButton(1))) SaveWorld();
             if (DrawMenuButton("Shaders  [S]", PauseButton(2))) OpenShaderMenu();
-            if (DrawMenuButton("Steam co-op  [M]", PauseButton(3))) coopPanel = true;
+            if (!survivalMode && DrawMenuButton("Steam co-op  [M]", PauseButton(3))) coopPanel = true;
             if (DrawMenuButton("Save and quit  [Q]", PauseButton(4))) quitRequested = true;
+            if (DrawMenuButton("Back to world select", PauseButton(5))) ReturnToTitle();
         }
         if (Raylib.GetTime() < statusUntil)
             Raylib.DrawText(status, (w - Raylib.MeasureText(status, 20)) / 2, h - 135, 20, Col(255, 240, 150));

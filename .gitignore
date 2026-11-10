@@ -23,3 +23,10 @@ saves/
 *.tmp
 .tether
 screenshot*.png
+.bgfx-sdk/
+BgfxNative/
+bgfx-preview.tga
+.filament-sdk/
+FilamentNative/
+filament-preview.ppm
+/shaderpacks/*.zip

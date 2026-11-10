@@ -1,7 +1,7 @@
 using System.Diagnostics;
-using System.IO.Compression;
 using System.Numerics;
 using Raylib_cs;
+using MinecraftCS.Graphics;
 
 namespace MinecraftCS;
 
@@ -9,8 +9,11 @@ namespace MinecraftCS;
 // Поддерживает добавление шейдеров в папку shaderpacks/ и переключение через UI
 internal static unsafe partial class Program
 {
-    static readonly string ShaderpacksDir = Path.Combine(AppContext.BaseDirectory, "shaderpacks");
+    static readonly string ShaderpacksDir = ResolveShaderpacksDirectory(AppContext.BaseDirectory);
     static readonly List<string> shaderPacks = new();
+    static readonly Dictionary<string, string> shaderPackPaths = new(StringComparer.OrdinalIgnoreCase);
+    static int shaderPackOffset;
+    const int VisibleShaderPacks = 7;
     static string currentShaderPack = "(internal) Vanilla";
     static bool shaderMenuOpen;
     static Texture2D dirtUiTex;
@@ -52,96 +55,55 @@ internal static unsafe partial class Program
     static void ScanShaderPacks()
     {
         shaderPacks.Clear();
+        shaderPackPaths.Clear();
         shaderPacks.Add("(internal) Vanilla");
 
         if (!Directory.Exists(ShaderpacksDir)) return;
 
-        // Автоматическая распаковка .zip архивов, если их бросили в shaderpacks/
-        foreach (var zipFile in Directory.GetFiles(ShaderpacksDir, "*.zip"))
+        var candidates = Directory.GetDirectories(ShaderpacksDir)
+            .Where(dir => File.Exists(Path.Combine(dir, "fragment.glsl")) || Directory.Exists(Path.Combine(dir, "shaders")))
+            .Concat(Directory.GetFiles(ShaderpacksDir, "*.zip"));
+        foreach (var path in candidates)
         {
-            try
-            {
-                string packName = Path.GetFileNameWithoutExtension(zipFile);
-                string targetDir = Path.Combine(ShaderpacksDir, packName);
-                if (!Directory.Exists(targetDir))
-                {
-                    ZipFile.ExtractToDirectory(zipFile, targetDir);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[ShaderManager] Zip extraction error: {ex.Message}");
-            }
+            string name = Directory.Exists(path) ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
+            if (name.Equals("(internal) Vanilla", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!shaderPackPaths.TryAdd(name, path)) continue;
+            shaderPacks.Add(name);
         }
-
-        // Поиск всех подпапок с шейдерами
-        foreach (var dir in Directory.GetDirectories(ShaderpacksDir))
-        {
-            string name = Path.GetFileName(dir);
-            // Папка считается шейдерпаком, если в ней есть fragment.glsl или shaders/
-            string fragPath = Path.Combine(dir, "fragment.glsl");
-            if (File.Exists(fragPath) || Directory.Exists(Path.Combine(dir, "shaders")))
-            {
-                if (!shaderPacks.Contains(name))
-                    shaderPacks.Add(name);
-            }
-        }
+        shaderPacks.Sort(1, shaderPacks.Count - 1, StringComparer.OrdinalIgnoreCase);
+        shaderPackOffset = Math.Clamp(shaderPackOffset, 0, Math.Max(0, shaderPacks.Count - VisibleShaderPacks));
     }
 
     // Применение выбранного шейдерпака
     static bool ApplyShaderPack(string packName)
     {
+        Shader candidateWorld = default;
+        IScreenRenderChain candidatePost = null;
         try
         {
-            string vsSrc;
-            string fsSrc;
+            ShaderPackSource source = packName == "(internal) Vanilla"
+                ? new ShaderPackSource(VertexShaderSrc, FragmentShaderSrc, false)
+                : ReadShaderPack(shaderPackPaths[packName]);
 
-            if (packName == "(internal) Vanilla")
-            {
-                vsSrc = VertexShaderSrc;
-                fsSrc = FragmentShaderSrc;
-            }
-            else
-            {
-                string packDir = Path.Combine(ShaderpacksDir, packName);
-                string vsFile = Path.Combine(packDir, "vertex.glsl");
-                string fsFile = Path.Combine(packDir, "fragment.glsl");
+            candidateWorld = Raylib.LoadShaderFromMemory(source.Vertex.Replace("@TILE_COUNT@", TileCount.ToString()),
+                PrepareFragmentShader(source.Fragment));
+            if (!IsWorldShaderLoaded(candidateWorld))
+                throw new InvalidDataException($"Terrain shader failed: {packName}");
+            if (source.Post is { Length: > 0 } stages)
+                candidatePost = renderBackend.CreateScreenChain(stages, Raylib.GetScreenWidth(), Raylib.GetScreenHeight());
 
-                // Если шейдеры вложены в shaders/
-                if (!File.Exists(fsFile) && Directory.Exists(Path.Combine(packDir, "shaders")))
-                {
-                    string subVs = Path.Combine(packDir, "shaders", "vertex.glsl");
-                    string subFs = Path.Combine(packDir, "shaders", "fragment.glsl");
-                    if (File.Exists(subFs)) { vsFile = subVs; fsFile = subFs; }
-                }
-
-                if (!File.Exists(fsFile))
-                {
-                    ShowStatus($"Shader files not found in: {packName}");
-                    return false;
-                }
-
-                vsSrc = File.Exists(vsFile) ? File.ReadAllText(vsFile) : VertexShaderSrc;
-                fsSrc = File.ReadAllText(fsFile);
-            }
-
-            Shader newShader = Raylib.LoadShaderFromMemory(vsSrc, PrepareFragmentShader(fsSrc));
-            if (!IsWorldShaderLoaded(newShader))
-            {
-                ShowStatus($"Shader error: {packName}");
-                return false;
-            }
-
-            // Шейдер успешно скомпилирован — освобождаем старый шейдер, если он был загружен
-            if (shaderOk && worldShader.Id != 0)
-            {
-                Raylib.UnloadShader(worldShader);
-            }
-
-            worldShader = newShader;
+            if (shaderOk) Raylib.UnloadShader(worldShader);
+            activeScreenChain?.Dispose();
+            activeScreenChain = candidatePost;
+            candidatePost = null;
+            worldShader = candidateWorld;
+            candidateWorld = default;
             shaderOk = true;
 
             BindWorldShader();
+            material.Maps[(int)MaterialMapIndex.Normal].Texture = source.Java
+                ? new Texture2D { Id = Rlgl.GetTextureIdDefault(), Width = 1, Height = 1, Mipmaps = 1 }
+                : default;
 
             currentShaderPack = packName;
             ShowStatus($"Shader active: {packName}");
@@ -150,8 +112,13 @@ internal static unsafe partial class Program
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[ShaderManager] Shader compile failed: {ex.Message}");
-            ShowStatus($"Shader compile failed: {packName}");
+            ShowStatus(ex is InvalidDataException ? ex.Message : $"Could not load shader: {packName}");
             return false;
+        }
+        finally
+        {
+            if (IsWorldShaderLoaded(candidateWorld)) Raylib.UnloadShader(candidateWorld);
+            candidatePost?.Dispose();
         }
     }
 
@@ -171,11 +138,14 @@ internal static unsafe partial class Program
         int panelX = (w - panelW) / 2;
         int panelY = (h - panelH) / 2 - 20;
 
+        float scroll = Raylib.GetMouseWheelMove();
+        if (scroll != 0) shaderPackOffset = Math.Clamp(shaderPackOffset - Math.Sign(scroll), 0, Math.Max(0, shaderPacks.Count - VisibleShaderPacks));
+        if (Raylib.IsKeyPressed(KeyboardKey.R)) ScanShaderPacks();
         // Клик по элементам списка шейдеров
         if (Raylib.IsMouseButtonPressed(MouseButton.Left))
         {
             int itemY = panelY + 12;
-            for (int i = 0; i < shaderPacks.Count; i++)
+            for (int i = shaderPackOffset; i < Math.Min(shaderPacks.Count, shaderPackOffset + VisibleShaderPacks); i++)
             {
                 Rectangle itemRect = new(panelX + 10, itemY, panelW - 20, 36);
                 if (Raylib.CheckCollisionPointRec(mouse, itemRect))
@@ -252,7 +222,7 @@ internal static unsafe partial class Program
         }
 
         CenterWithShadow("Shaders", 28, 28, Col(255, 255, 255));
-        CenterWithShadow("Drop shader packs into 'shaderpacks' folder to use them", 62, 16, Col(180, 180, 180));
+        CenterWithShadow("Add a folder or ZIP, then press R to refresh", 62, 16, Col(180, 180, 180));
 
         // 3. Центральная панель списка шейдеров (Minecraft Inset Frame)
         int panelW = 460, panelH = 340;
@@ -263,7 +233,7 @@ internal static unsafe partial class Program
 
         // 4. Отрисовка элементов списка шейдерпаков
         int itemY = panelY + 12;
-        for (int i = 0; i < shaderPacks.Count; i++)
+        for (int i = shaderPackOffset; i < Math.Min(shaderPacks.Count, shaderPackOffset + VisibleShaderPacks); i++)
         {
             string pack = shaderPacks[i];
             bool isSelected = pack == currentShaderPack;
@@ -273,6 +243,8 @@ internal static unsafe partial class Program
             DrawMinecraftListItem(itemRect, pack, isSelected, isHovered);
             itemY += 42;
         }
+
+        if (Raylib.GetTime() < statusUntil) CenterWithShadow(status, panelY + panelH - 23, 15, Col(255, 230, 153));
 
         // 5. Кнопки в стиле Minecraft внизу экрана
         Rectangle btnFolderRect = new(panelX, panelY + panelH + 16, 240, 38);

@@ -56,7 +56,7 @@ void main()
     vec3 albedo = pow(rawTex.rgb, vec3(2.2));
 
     // Определение свойств материала по атласу
-    float tile = floor(fragUV.x * 11.0);
+    float tile = floor(fragUV.x * @TILE_COUNT@.0);
     float roughness = 0.75;
     float f0 = 0.04;
     float sssAmount = 0.0;

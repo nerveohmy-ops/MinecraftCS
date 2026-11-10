@@ -1,6 +1,8 @@
 using Raylib_cs;
 using System.Diagnostics;
 using System.Numerics;
+using System.Runtime.InteropServices;
+using MinecraftCS.Graphics;
 
 namespace MinecraftCS;
 
@@ -8,10 +10,13 @@ internal static unsafe partial class Program
 {
     const int MaxVertsPerMesh = 65532;          // предел 16-битных индексов (ushort), кратно 4
 
-    const int TileSize = 32, TileCount = 11;     // атлас 352x32, Faithful 32x
+    const int TileSize = 32, TileCount = 14;
 
     static Texture2D atlas;
     static Material material;
+    static readonly OpenGlRenderBackend openGlBackend = new();
+    static IRenderBackend renderBackend = openGlBackend;
+    static IScreenRenderChain activeScreenChain;
 
     // Тайлы блоков: [блок, (верх, бок, низ)]
     static readonly int[,] Tiles =
@@ -26,6 +31,7 @@ internal static unsafe partial class Program
         { 8, 8, 8 },   // доски
         { 9, 9, 9 },   // кирпич
         { 10, 10, 10 }, // булыжник
+        { 11, 11, 11 }, { 12, 12, 12 }, { 13, 13, 13 },
     };
 
     // Грани: +X, -X, +Y, -Y, +Z, -Z (вершины против часовой стрелки, если смотреть снаружи)
@@ -106,6 +112,18 @@ internal static unsafe partial class Program
                     Paint(out r, out g, out b, 65, 65, 65, 8, f);
                 else Paint(out r, out g, out b, 116, 117, 112, 18, f);
                 break;
+            case 11:
+            case 12:
+            case 13:
+                // Draw ore flecks in irregular clusters on the procedural stone base.
+                TileColor(3, x, y, out r, out g, out b);
+                if (Hash(x / 3, y / 3, 600 + t) % 11 < 3 && hv % 5 != 0)
+                {
+                    if (t == 11) Paint(out r, out g, out b, 42, 41, 39, 9, f);
+                    if (t == 12) Paint(out r, out g, out b, 181, 123, 91, 15, f);
+                    if (t == 13) Paint(out r, out g, out b, 235, 189, 63, 20, f);
+                }
+                break;
             default:
                 if (hv % 5 == 0) Paint(out r, out g, out b, 28, 80, 22, 10, f);
                 else Paint(out r, out g, out b, 46, 118, 36, 18, f);
@@ -113,7 +131,7 @@ internal static unsafe partial class Program
         }
     }
 
-    static Texture2D MakeAtlas()
+    static Image BuildAtlasImage()
     {
         int aw = TileSize * TileCount;
         Image img = Raylib.GenImageColor(aw, TileSize, Col(0, 0, 0, 0));   // RGBA8, память выделена самой Raylib
@@ -127,6 +145,12 @@ internal static unsafe partial class Program
             px[o] = (byte)r; px[o + 1] = (byte)g; px[o + 2] = (byte)b; px[o + 3] = 255;
         }
         ApplyBlockTextures(ref img);
+        return img;
+    }
+
+    static Texture2D MakeAtlas()
+    {
+        Image img = BuildAtlasImage();
         Texture2D tex = Raylib.LoadTextureFromImage(img);
         Raylib.UnloadImage(img);
         Raylib.SetTextureFilter(tex, TextureFilter.Point);   // пиксельный стиль без размытия
@@ -232,56 +256,25 @@ internal static unsafe partial class Program
         return indices;
     }
 
-    static bool TryUploadChunkPart(int vertexCount, ReadOnlySpan<ushort> indices, out Mesh mesh)
-    {
-        mesh = new Mesh { VertexCount = vertexCount, TriangleCount = indices.Length / 3 };
-        bool uploaded = false;
-        try
-        {
-            // Allocate with Raylib's allocator so UnloadMesh can free these buffers.
-            mesh.Vertices = Raylib.New<float>((uint)(vertexCount * 3));
-            mesh.TexCoords = Raylib.New<float>((uint)(vertexCount * 2));
-            mesh.Normals = Raylib.New<float>((uint)(vertexCount * 3));
-            mesh.Colors = Raylib.New<byte>((uint)(vertexCount * 4));
-            mesh.Indices = Raylib.New<ushort>((uint)indices.Length);
-            if (mesh.Vertices == null || mesh.TexCoords == null || mesh.Normals == null ||
-                mesh.Colors == null || mesh.Indices == null) return false;
-
-            for (int i = 0; i < vertexCount * 3; i++) mesh.Vertices[i] = vBuf[i];
-            for (int i = 0; i < vertexCount * 2; i++) mesh.TexCoords[i] = uvBuf[i];
-            for (int i = 0; i < vertexCount * 3; i++) mesh.Normals[i] = nBuf[i];
-            for (int i = 0; i < vertexCount * 4; i++) mesh.Colors[i] = aoBuf[i];
-            indices.CopyTo(new Span<ushort>(mesh.Indices, indices.Length));
-
-            fixed (Mesh* target = &mesh) Raylib.UploadMesh(target, false);
-            // OpenGL buffer slots for positions, UV, normals, colors and indices.
-            uploaded = mesh.VboId != null && mesh.VboId[0] != 0 && mesh.VboId[1] != 0 &&
-                mesh.VboId[2] != 0 && mesh.VboId[3] != 0 && mesh.VboId[6] != 0;
-            return uploaded;
-        }
-        finally
-        {
-            if (!uploaded) Raylib.UnloadMesh(mesh);
-        }
-    }
-
     static void UnloadChunkMeshes(Chunk chunk)
     {
         if (chunk.Meshes == null) return;
-        foreach (var mesh in chunk.Meshes) Raylib.UnloadMesh(mesh);
+        foreach (var mesh in chunk.Meshes) mesh.Dispose();
         chunk.Meshes = null;
     }
 
     static bool BuildChunk(Chunk chunk)
     {
-        var replacement = new List<Mesh>();
+        var replacement = new List<IRenderMesh>();
         bool committed = false;
         try
         {
-            bool complete = BuildChunkGeometry(chunk.X, chunk.Z, (vertexCount, indices) =>
+            bool complete = BuildChunkGeometry(chunk.X, chunk.Z, (_, indices) =>
             {
                 replacement.EnsureCapacity(replacement.Count + 1);
-                if (!TryUploadChunkPart(vertexCount, indices, out var mesh)) return false;
+                var mesh = renderBackend.UploadChunk(CollectionsMarshal.AsSpan(vBuf), CollectionsMarshal.AsSpan(uvBuf),
+                    CollectionsMarshal.AsSpan(nBuf), CollectionsMarshal.AsSpan(aoBuf), indices);
+                if (mesh == null) return false;
                 replacement.Add(mesh);
                 return true;
             });
@@ -295,7 +288,7 @@ internal static unsafe partial class Program
         finally
         {
             if (!committed)
-                foreach (var mesh in replacement) Raylib.UnloadMesh(mesh);
+                foreach (var mesh in replacement) mesh.Dispose();
         }
     }
 
@@ -313,7 +306,8 @@ internal static unsafe partial class Program
 
     static readonly string[] PackTiles = {
         "grass_block_top", "grass_block_side", "dirt", "stone", "sand",
-        "oak_log", "oak_log_top", "oak_leaves", "oak_planks", "bricks", "cobblestone"
+        "oak_log", "oak_log_top", "oak_leaves", "oak_planks", "bricks", "cobblestone",
+        "coal_ore", "iron_ore", "gold_ore"
     };
 
     static void ApplyBlockTextures(ref Image atlasImage)
@@ -525,6 +519,7 @@ internal static unsafe partial class Program
 
     static string PrepareFragmentShader(string source) => source
         .Replace("@SHADOW_TRACE@", ShadowTraceShaderSrc)
+        .Replace("@TILE_COUNT@", TileCount.ToString())
         .Replace("@WX@", W.ToString()).Replace("@WY@", H.ToString()).Replace("@WZ@", D.ToString());
 
     static int shadowHeight, locShadowHeight, locShadowRays, locInvViewport;
@@ -634,6 +629,7 @@ internal static unsafe partial class Program
         locShadowRays = Raylib.GetShaderLocation(worldShader, "shadowRays[0]");
         locInvViewport = Raylib.GetShaderLocation(worldShader, "invViewport");
         material.Shader = worldShader;
+        openGlBackend.SetWorldMaterial(material);
         // DrawMesh сам привяжет эти текстуры к texture0 / texture1
         material.Maps[(int)MaterialMapIndex.Metalness].Texture = occTex;
     }
@@ -780,7 +776,10 @@ internal static unsafe partial class Program
 
         Vector3 look = LookDir();
 
+        var screenChain = activeScreenChain;
+        bool post = screenChain?.EnsureSize(Raylib.GetScreenWidth(), Raylib.GetScreenHeight()) == true;
         Raylib.BeginDrawing();
+        if (post) screenChain.BeginScene();
         Raylib.ClearBackground(skyColor);
         ApplyLighting();                 // параметры солнца -> шейдер
         DrawCelestials(cam, look);       // солнце и луна
@@ -795,20 +794,24 @@ internal static unsafe partial class Program
             Vector3 center = new Vector3(chunk.X * ChunkSize + ChunkSize / 2f, H / 2f,
                                          chunk.Z * ChunkSize + ChunkSize / 2f) - cam.Position;
             if (Vector3.Dot(center, look) + chunkHalfDepth < 0f) continue;
-            foreach (var mesh in chunk.Meshes) Raylib.DrawMesh(mesh, material, Matrix4x4.Identity);
+            foreach (var mesh in chunk.Meshes) renderBackend.DrawChunk(mesh);
         }
         if (hasHit)   // подсветка блока под прицелом
             Raylib.DrawCubeWiresV(new Vector3(hitX + 0.5f, hitY + 0.5f, hitZ + 0.5f),
                 new Vector3(1.004f, 1.004f, 1.004f), Col(0, 0, 0));
         if (showChunkBorders) DrawChunkBorders();
         DrawCoopFriend();
+        DrawSurvivalMobs();
         DrawBlockParticles();
         Raylib.EndMode3D();
 
         if (!diagnosticRender) DrawFirstPersonHand();
 
+        if (post) screenChain.PresentScene((float)shaderAnimationTime);
+
         DrawHud();   // 2D поверх 3D-сцены
-        if (inventoryOpen) DrawInventory();
+        if (survivalMode) DrawSurvivalHud();
+        if (inventoryOpen) { if (survivalMode) DrawSurvivalInventory(); else DrawInventory(); }
         DrawPauseAndStatus();
         if (coopPanel) DrawCoopMenu();
         if (shaderMenuOpen) DrawShaderMenu();

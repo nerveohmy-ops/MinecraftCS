@@ -115,7 +115,7 @@ internal static unsafe partial class Program
 
     static void CreateCoop()
     {
-        if (!steamReady || coopBusy || coopLobby.IsValid()) return;
+        if (survivalMode || !steamReady || coopBusy || coopLobby.IsValid()) return;
         coopHost = coopBusy = true;
         coopDeadline = Raylib.GetTime()+30;
         coopStatus = "Creating private lobby...";
@@ -138,6 +138,8 @@ internal static unsafe partial class Program
     static void JoinCoop(CSteamID lobby)
     {
         if (!steamReady || !lobby.IsValid() || coopLobby == lobby || coopBusy) return;
+        if (titleOpen && !OpenNamedWorld(legacyWorldPath, allowEmpty: true)) return;
+        if (survivalMode) { ShowStatus("Steam co-op is available in creative worlds"); return; }
         EndCoop("Joining Steam lobby...");
         coopPanel = coopBusy = true;
         expectedLobby = lobby;
@@ -275,7 +277,7 @@ internal static unsafe partial class Program
                 coopDeadline = Raylib.GetTime()+30;
                 break;
             case "start" when incomingWorld != null:
-                if (!ValidSave(incomingWorld) || !ValidPlayer(p.Host))
+                if (!ValidSave(incomingWorld) || incomingWorld.Survival || !ValidPlayer(p.Host))
                 { EndCoop("Invalid world snapshot."); break; }
                 if (!TryEnterGuestWorld(incomingWorld, worldStorage, out string error))
                 { EndCoop($"Cannot join: {error}"); break; }
@@ -290,7 +292,7 @@ internal static unsafe partial class Program
                 timeOfDay = p.Time;
                 UpdateSun(0);
                 break;
-            case "block" when coopMatched && p.Y is > 0 and < H && p.Block <= Cobblestone &&
+            case "block" when coopMatched && p.Y is > 0 and < H && p.Block <= GoldOre &&
                 Math.Abs((long)p.X)<=100000000 && Math.Abs((long)p.Z)<=100000000:
                 var key = (FloorChunk(p.X),FloorChunk(p.Z));
                 if (chunks.ContainsKey(key))
