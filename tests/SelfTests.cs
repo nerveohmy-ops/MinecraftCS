@@ -492,6 +492,12 @@ internal static unsafe partial class Program
         {
             check(ex.Message.Contains("shadow, shadowcomp"), "Overworld package reports unsupported pass names");
         }
+        if (File.Exists("shaderpacks/Realis_v1.0_2.zip"))
+        {
+            var realisPack = ReadShaderPack("shaderpacks/Realis_v1.0_2.zip");
+            check(realisPack != null && !string.IsNullOrEmpty(realisPack.Fragment) && realisPack.Fragment.Contains("tonemapACES"),
+                "Realis Java shader pack adapts successfully to native engine");
+        }
     }
 }
 
