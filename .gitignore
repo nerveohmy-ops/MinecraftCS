@@ -19,6 +19,7 @@ dist/
 
 # Saves and local files
 saves/
+save-test-*/
 *.bak
 *.tmp
 .tether

@@ -1,20 +1,72 @@
-# Build and binary folders
-bin/
-bin/**
-obj/
-obj/**
+# Git & Tether internals
+.git/
+.git/**
+.tether
+.tether/**
+
+# Build and binary outputs
+[Bb]in/
+[Bb]in/**
+[Oo]bj/
+[Oo]bj/**
 **/bin/**
 **/obj/**
 dist/
 dist/**
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+steam_appid.txt
 
-# Visual Studio / IDE temporary files
+# Visual Studio / VS Code / JetBrains
 .vs/
 .vs/**
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.idea/
+.idea/**
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
 
-# Logs & temp
+# Logs, temporary files and backups
 *.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Local game saves and automated test worlds
+saves/
+saves/**
+save-test-*/
+save-test-*/**
+
+# Screenshots
+screenshot*.png
+*.screenshot.png
+
+# Raw downloaded shader archives
+/shaderpacks/*.zip
+
+# Legacy root source files (moved into src/ and tests/)
+/AmbientAudio.cs
+/BlockTextures.cs
+/ChunkGeneration.cs
+/ChunkTests.cs
+/CoopGameplay.cs
+/CoopPlayerModel.cs
+/GameplayAudio.cs
+/PlayerAnimations.cs
+/PlayerMovement.cs
+/Program.cs
+/ShaderManager.cs
+/SteamCoop.cs
+/VertexLighting.cs
+/WorldSave.cs
+/shaderpacks/Vanilla/
