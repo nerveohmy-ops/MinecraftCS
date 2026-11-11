@@ -1,2 +1,0 @@
-Vanilla
-Standard MinecraftCS voxel shading with directional lighting and voxel sun shadows.

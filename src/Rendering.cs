@@ -14,9 +14,7 @@ internal static unsafe partial class Program
 
     static Texture2D atlas;
     static Material material;
-    static readonly OpenGlRenderBackend openGlBackend = new();
-    static IRenderBackend renderBackend = openGlBackend;
-    static IScreenRenderChain activeScreenChain;
+    static readonly OpenGlRenderBackend renderBackend = new();
 
     // Тайлы блоков: [блок, (верх, бок, низ)]
     static readonly int[,] Tiles =
@@ -265,7 +263,7 @@ internal static unsafe partial class Program
 
     static bool BuildChunk(Chunk chunk)
     {
-        var replacement = new List<IRenderMesh>();
+        var replacement = new List<OpenGlRenderBackend.ChunkMesh>();
         bool committed = false;
         try
         {
@@ -629,7 +627,7 @@ internal static unsafe partial class Program
         locShadowRays = Raylib.GetShaderLocation(worldShader, "shadowRays[0]");
         locInvViewport = Raylib.GetShaderLocation(worldShader, "invViewport");
         material.Shader = worldShader;
-        openGlBackend.SetWorldMaterial(material);
+        renderBackend.SetWorldMaterial(material);
         // DrawMesh сам привяжет эти текстуры к texture0 / texture1
         material.Maps[(int)MaterialMapIndex.Metalness].Texture = occTex;
     }
@@ -713,7 +711,7 @@ internal static unsafe partial class Program
         float fFar = renderRadius * ChunkSize - 4.0f;
         Raylib.SetShaderValue(worldShader, locFogNear, &fNear, ShaderUniformDataType.Float);
         Raylib.SetShaderValue(worldShader, locFogFar, &fFar, ShaderUniformDataType.Float);
-        float gt = AdvanceShaderAnimation(Raylib.GetTime(), timePaused || paused || inventoryOpen);
+        float gt = AdvanceShaderAnimation(Raylib.GetTime(), timePaused || paused || inventoryOpen || consoleOpen);
         if (locGameTime != -1)
             Raylib.SetShaderValue(worldShader, locGameTime, &gt, ShaderUniformDataType.Float);
         Vector3 origin = new(occX, 0, occZ);
@@ -776,10 +774,7 @@ internal static unsafe partial class Program
 
         Vector3 look = LookDir();
 
-        var screenChain = activeScreenChain;
-        bool post = screenChain?.EnsureSize(Raylib.GetScreenWidth(), Raylib.GetScreenHeight()) == true;
         Raylib.BeginDrawing();
-        if (post) screenChain.BeginScene();
         Raylib.ClearBackground(skyColor);
         ApplyLighting();                 // параметры солнца -> шейдер
         DrawCelestials(cam, look);       // солнце и луна
@@ -807,14 +802,13 @@ internal static unsafe partial class Program
 
         if (!diagnosticRender) DrawFirstPersonHand();
 
-        if (post) screenChain.PresentScene((float)shaderAnimationTime);
-
         DrawHud();   // 2D поверх 3D-сцены
         if (survivalMode) DrawSurvivalHud();
         if (inventoryOpen) { if (survivalMode) DrawSurvivalInventory(); else DrawInventory(); }
         DrawPauseAndStatus();
         if (coopPanel) DrawCoopMenu();
         if (shaderMenuOpen) DrawShaderMenu();
+        if (consoleOpen) DrawConsole();
         Raylib.EndDrawing();
     }
 }

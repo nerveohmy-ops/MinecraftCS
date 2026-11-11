@@ -42,7 +42,7 @@ internal static unsafe partial class Program
             ambientEnabled = !ambientEnabled;
             ShowStatus(ambientEnabled ? "Ambient sound ON" : "Ambient sound OFF");
         }
-        if (!ambientEnabled || paused || inventoryOpen || coopPanel || !Raylib.IsWindowFocused())
+        if (!ambientEnabled || paused || inventoryOpen || consoleOpen || coopPanel || !Raylib.IsWindowFocused())
         {
             StopAmbientSounds();
             return;
@@ -112,7 +112,7 @@ internal static unsafe partial class Program
 
     static void PlayEffect(string key, float volume, Vector3? source = null)
     {
-        if (!audioReady || !effectsEnabled || paused || inventoryOpen || coopPanel || !Raylib.IsWindowFocused()) return;
+        if (!audioReady || !effectsEnabled || paused || inventoryOpen || consoleOpen || coopPanel || !Raylib.IsWindowFocused()) return;
         if (!effectSounds.TryGetValue(key, out var sounds) || sounds.Count == 0) return;
         float pan = 0.5f;
         if (source.HasValue)
@@ -165,7 +165,7 @@ internal static unsafe partial class Program
             effectsEnabled = !effectsEnabled;
             ShowStatus(effectsEnabled ? "Sound effects ON" : "Sound effects OFF");
         }
-        if (!effectsEnabled || paused || inventoryOpen || coopPanel || !Raylib.IsWindowFocused())
+        if (!effectsEnabled || paused || inventoryOpen || consoleOpen || coopPanel || !Raylib.IsWindowFocused())
         {
             ResetGameplayAudio();
             return;

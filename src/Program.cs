@@ -97,15 +97,27 @@ internal static unsafe partial class Program
         if (titleOpen) { UpdateTitle(); return; }
         if (coopPanel) { UpdateCoopMenu(); return; }
         if (shaderMenuOpen) { UpdateShaderMenu(); return; }
-        if (Raylib.IsKeyPressed(KeyboardKey.F3)) debugHud = !debugHud;
-        if (Raylib.IsKeyPressed(KeyboardKey.F4)) showChunkBorders = !showChunkBorders;
         if (!Raylib.IsWindowFocused())
         {
+            SetConsoleOpen(false);
             inventoryOpen = false;
             SetPaused(true);
             return;
         }
 
+        if (consoleOpen) { UpdateConsole(); return; }
+        bool slashPressed = Raylib.IsKeyPressed(KeyboardKey.Slash);
+        if (!paused && !inventoryOpen && (slashPressed || Raylib.IsKeyPressed(KeyboardKey.F2)))
+        {
+            SetConsoleOpen(true);
+            // Discard the key's text event so the prompt starts with one slash.
+            while (Raylib.GetCharPressed() != 0) { }
+            if (slashPressed) consoleInput = "/";
+            return;
+        }
+
+        if (Raylib.IsKeyPressed(KeyboardKey.F3)) debugHud = !debugHud;
+        if (Raylib.IsKeyPressed(KeyboardKey.F4)) showChunkBorders = !showChunkBorders;
         bool escape = Raylib.IsKeyPressed(KeyboardKey.Escape);
         bool inventoryKey = Raylib.IsKeyPressed(KeyboardKey.E);
         if (Raylib.IsKeyPressed(KeyboardKey.F5)) SaveWorld();
@@ -180,13 +192,6 @@ internal static unsafe partial class Program
     static void Main(string[] args)
     {
         if (args.Contains("--self-test")) { RunSelfTests(); return; }
-        bool filamentPreview = args.Contains("--filament") || args.Contains("--filament-test");
-        if (filamentPreview || args.Contains("--bgfx") || args.Contains("--bgfx-test"))
-        {
-            if (!args.Contains("--bgfx-test") && !args.Contains("--filament-test")) EnsureDiscreteGpu(args);
-            Environment.ExitCode = RunRenderPreview(args, filamentPreview);
-            return;
-        }
         if (args.Contains("--steam-check"))
         {
             InitCoop();
@@ -214,7 +219,7 @@ internal static unsafe partial class Program
         LoadSurvivalTextures();
         material = Raylib.LoadMaterialDefault();
         material.Maps[(int)MaterialMapIndex.Albedo].Texture = atlas;
-        openGlBackend.SetWorldMaterial(material);
+        renderBackend.SetWorldMaterial(material);
 
         if (renderTest)
         {
@@ -301,7 +306,6 @@ internal static unsafe partial class Program
         UnloadSurvivalTextures();
         Raylib.UnloadTexture(occTex);
         if (dirtUiLoaded) Raylib.UnloadTexture(dirtUiTex);
-        activeScreenChain?.Dispose();
         if (shaderOk) Raylib.UnloadShader(worldShader);
         Raylib.CloseWindow();
         CloseAmbientAudio();

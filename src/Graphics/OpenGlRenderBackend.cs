@@ -3,13 +3,13 @@ using Raylib_cs;
 
 namespace MinecraftCS.Graphics;
 
-internal sealed unsafe class OpenGlRenderBackend : IRenderBackend
+internal sealed unsafe class OpenGlRenderBackend
 {
     Material worldMaterial;
 
     public void SetWorldMaterial(Material material) => worldMaterial = material;
 
-    sealed class ChunkMesh(Mesh handle) : IRenderMesh
+    internal sealed class ChunkMesh(Mesh handle) : IDisposable
     {
         public Mesh Handle { get; private set; } = handle;
 
@@ -21,7 +21,7 @@ internal sealed unsafe class OpenGlRenderBackend : IRenderBackend
         }
     }
 
-    public IRenderMesh UploadChunk(ReadOnlySpan<float> positions, ReadOnlySpan<float> uv,
+    public ChunkMesh UploadChunk(ReadOnlySpan<float> positions, ReadOnlySpan<float> uv,
         ReadOnlySpan<float> normals, ReadOnlySpan<byte> colors, ReadOnlySpan<ushort> indices)
     {
         Mesh mesh = new() { VertexCount = positions.Length / 3, TriangleCount = indices.Length / 3 };
@@ -57,23 +57,6 @@ internal sealed unsafe class OpenGlRenderBackend : IRenderBackend
         }
     }
 
-    public void DrawChunk(IRenderMesh mesh) =>
-        Raylib.DrawMesh(((ChunkMesh)mesh).Handle, worldMaterial, Matrix4x4.Identity);
-
-    public IScreenRenderChain CreateScreenChain(IReadOnlyList<RenderShaderSource> stages, int width, int height)
-    {
-        if (stages.Count == 0) throw new ArgumentException("A screen chain needs at least one stage", nameof(stages));
-        var chain = new OpenGlScreenChain(stages.Count);
-        try
-        {
-            for (int i = 0; i < stages.Count; i++) chain.CompileStage(i, stages[i]);
-            if (!chain.EnsureSize(width, height)) throw new InvalidDataException("Could not allocate screen-pass targets");
-            return chain;
-        }
-        catch
-        {
-            chain.Dispose();
-            throw;
-        }
-    }
+    public void DrawChunk(ChunkMesh mesh) =>
+        Raylib.DrawMesh(mesh.Handle, worldMaterial, Matrix4x4.Identity);
 }

@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Numerics;
 using Raylib_cs;
-using MinecraftCS.Graphics;
 
 namespace MinecraftCS;
 
@@ -14,7 +13,7 @@ internal static unsafe partial class Program
     static readonly Dictionary<string, string> shaderPackPaths = new(StringComparer.OrdinalIgnoreCase);
     static int shaderPackOffset;
     const int VisibleShaderPacks = 7;
-    static string currentShaderPack = "(internal) Vanilla";
+    static string currentShaderPack = "Built-in fallback";
     static bool shaderMenuOpen;
     static Texture2D dirtUiTex;
     static bool dirtUiLoaded;
@@ -56,21 +55,18 @@ internal static unsafe partial class Program
     {
         shaderPacks.Clear();
         shaderPackPaths.Clear();
-        shaderPacks.Add("(internal) Vanilla");
-
         if (!Directory.Exists(ShaderpacksDir)) return;
 
         var candidates = Directory.GetDirectories(ShaderpacksDir)
-            .Where(dir => File.Exists(Path.Combine(dir, "fragment.glsl")) || Directory.Exists(Path.Combine(dir, "shaders")))
-            .Concat(Directory.GetFiles(ShaderpacksDir, "*.zip"));
+            .Where(dir => File.Exists(Path.Combine(dir, "fragment.glsl")))
+            .Concat(Directory.GetFiles(ShaderpacksDir, "*.zip").Where(IsMinecraftCsShaderArchive));
         foreach (var path in candidates)
         {
             string name = Directory.Exists(path) ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
-            if (name.Equals("(internal) Vanilla", StringComparison.OrdinalIgnoreCase)) continue;
             if (!shaderPackPaths.TryAdd(name, path)) continue;
             shaderPacks.Add(name);
         }
-        shaderPacks.Sort(1, shaderPacks.Count - 1, StringComparer.OrdinalIgnoreCase);
+        shaderPacks.Sort(StringComparer.OrdinalIgnoreCase);
         shaderPackOffset = Math.Clamp(shaderPackOffset, 0, Math.Max(0, shaderPacks.Count - VisibleShaderPacks));
     }
 
@@ -78,33 +74,21 @@ internal static unsafe partial class Program
     static bool ApplyShaderPack(string packName)
     {
         Shader candidateWorld = default;
-        IScreenRenderChain candidatePost = null;
         try
         {
-            ShaderPackSource source = packName == "(internal) Vanilla"
-                ? new ShaderPackSource(VertexShaderSrc, FragmentShaderSrc, false)
-                : ReadShaderPack(shaderPackPaths[packName]);
+            ShaderPackSource source = ReadShaderPack(shaderPackPaths[packName]);
 
             candidateWorld = Raylib.LoadShaderFromMemory(source.Vertex.Replace("@TILE_COUNT@", TileCount.ToString()),
                 PrepareFragmentShader(source.Fragment));
             if (!IsWorldShaderLoaded(candidateWorld))
                 throw new InvalidDataException($"Terrain shader failed: {packName}");
-            if (source.Post is { Length: > 0 } stages)
-                candidatePost = renderBackend.CreateScreenChain(stages, Raylib.GetScreenWidth(), Raylib.GetScreenHeight());
 
             if (shaderOk) Raylib.UnloadShader(worldShader);
-            activeScreenChain?.Dispose();
-            activeScreenChain = candidatePost;
-            candidatePost = null;
             worldShader = candidateWorld;
             candidateWorld = default;
             shaderOk = true;
 
             BindWorldShader();
-            material.Maps[(int)MaterialMapIndex.Normal].Texture = source.Java
-                ? new Texture2D { Id = Rlgl.GetTextureIdDefault(), Width = 1, Height = 1, Mipmaps = 1 }
-                : default;
-
             currentShaderPack = packName;
             ShowStatus($"Shader active: {packName}");
             return true;
@@ -118,7 +102,6 @@ internal static unsafe partial class Program
         finally
         {
             if (IsWorldShaderLoaded(candidateWorld)) Raylib.UnloadShader(candidateWorld);
-            candidatePost?.Dispose();
         }
     }
 

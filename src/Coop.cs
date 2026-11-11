@@ -418,6 +418,7 @@ internal static unsafe partial class Program
         coopStatus = message;
         if (!closing)
         {
+            SetConsoleOpen(false);
             paused = coopPanel = true;
             Raylib.EnableCursor();
         }

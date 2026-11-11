@@ -156,12 +156,18 @@ internal static unsafe partial class Program
         if (slot >= 0) selected = slot;
     }
 
+    static void SetFlight(bool enabled)
+    {
+        if (flying == enabled) return;
+        flying = enabled;
+        vel = Vector3.Zero;
+    }
+
     static void UpdateMovementMode()
     {
         if (!survivalMode && Raylib.IsKeyPressed(KeyboardKey.F))
         {
-            flying = !flying;
-            vel = Vector3.Zero;
+            SetFlight(!flying);
             ShowStatus(flying ? "Flight enabled" : "Flight disabled");
         }
         bool wasCrouching = crouching;

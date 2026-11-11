@@ -106,7 +106,7 @@ internal static unsafe partial class Program
     {
         public int X, Z;
         public byte[] Blocks;
-        public List<IRenderMesh> Meshes;
+        public List<OpenGlRenderBackend.ChunkMesh> Meshes;
         public bool Dirty = true, Modified;
     }
     static readonly Dictionary<(int X, int Z), Chunk> chunks = new();

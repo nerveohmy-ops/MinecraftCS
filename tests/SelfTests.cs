@@ -151,7 +151,8 @@ internal static unsafe partial class Program
             AdvanceShaderAnimation(12, freeze: false) == 2f,
             "Paused shader animation resumes without jumping");
         TestSurvival(Check);
-        TestJavaShaderPacks(Check);
+        TestMinecraftCsShaderPacks(Check);
+        TestConsoleCommands(Check);
         Console.WriteLine($"{count} checks passed");
     }
 
@@ -403,101 +404,4 @@ internal static unsafe partial class Program
         }
         finally { folder.Delete(recursive: true); }
     }
-
-    static void TestJavaShaderPacks(Action<bool, string> check)
-    {
-        const string root = "Wrapped/shaders/";
-        var files = new Dictionary<string, string>
-        {
-            [root + "gbuffers_terrain.vsh"] = "#version 120\nvoid main() { gl_Position = ftransform(); }",
-            [root + "gbuffers_terrain.fsh"] = "#version 120\n#include \"/lib/color.glsl\"\nvoid main() { gl_FragData[0] = tint; }",
-            [root + "lib/color.glsl"] = "const vec4 tint = vec4(1.0);"
-        };
-        var pack = ReadShaderEntries(files.Keys, file => files[file]);
-        check(pack.Java && pack.Vertex.StartsWith("#version 330 core") &&
-            !pack.Vertex.Contains("#version 120") && !pack.Fragment.Contains("#version 120") &&
-            pack.Fragment.Contains("const vec4 tint") && pack.Fragment.Contains("javaFragment = tint"),
-            "Wrapped Java pack adapts terrain shaders and resolves absolute includes");
-
-        bool Rejects()
-        {
-            try { ReadShaderEntries(files.Keys, file => files[file]); return false; }
-            catch (InvalidDataException) { return true; }
-        }
-
-        const string post = "#version 120\nuniform sampler2D colortex0;\nvoid main() { gl_FragColor = texture2D(colortex0, gl_TexCoord[0].st); }";
-        files[root + "final.fsh"] = post + " // final pass";
-        pack = ReadShaderEntries(files.Keys, file => files[file]);
-        check(pack.Post is { Length: 1 } && pack.Post[0].Vertex.Contains("javaVertexMain") &&
-            pack.Post[0].Fragment.Contains("texture2D(texture0"), "Java final pass samples scene color");
-        files[root + "composite.fsh"] = post + " // base pass";
-        files[root + "composite10.fsh"] = post + " // tenth pass";
-        files[root + "composite2.fsh"] = post + " // second pass";
-        pack = ReadShaderEntries(files.Keys, file => files[file]);
-        check(pack.Post.Length == 4 && pack.Post[0].Fragment.Contains("base pass") &&
-            pack.Post[1].Fragment.Contains("second pass") && pack.Post[2].Fragment.Contains("tenth pass") &&
-            pack.Post[3].Fragment.Contains("final pass"),
-            "Java composite passes use numeric order and final runs last");
-        files[root + "shadow.fsh"] = post;
-        check(Rejects(), "A Java pack requiring shadow passes is rejected");
-        files.Remove(root + "shadow.fsh");
-        files.Remove(root + "composite10.fsh");
-        files.Remove(root + "composite2.fsh");
-        files.Remove(root + "final.fsh");
-        pack = ReadShaderEntries(files.Keys, file => files[file]);
-        check(pack.Post is { Length: 1 }, "A single Java composite pass is accepted");
-        files[root + "composite.fsh"] = post.Replace("colortex0", "colortex1");
-        check(Rejects(), "A Java screen pass cannot read an unsupported color buffer");
-        string depthPass = post.Replace("colortex0", "depthtex0");
-        files[root + "composite.fsh"] = depthPass;
-        pack = ReadShaderEntries(files.Keys, file => files[file]);
-        check(pack.Post[0].Fragment.Contains("texture2D(javaSceneDepth"), "Screen pass can sample the scene depth texture");
-        files[root + "composite.fsh"] = depthPass.Replace("depthtex0", "gdepthtex");
-        pack = ReadShaderEntries(files.Keys, file => files[file]);
-        check(pack.Post[0].Fragment.Contains("texture2D(javaSceneDepth"), "Legacy gdepthtex aliases scene depth");
-        files[root + "composite.fsh"] = depthPass.Replace("depthtex0", "depthtex1");
-        check(Rejects(), "Java depth snapshots beyond depthtex0 are rejected");
-        files.Remove(root + "composite.fsh");
-        files[root + "lib/color.glsl"] = "#include \"../../outside.glsl\"";
-        check(Rejects(), "Java shader include cannot escape the shaders directory");
-        files[root + "lib/color.glsl"] = "#include \"/lib/color.glsl\"";
-        check(Rejects(), "Recursive Java shader include is rejected");
-        files[root + "lib/color.glsl"] = "const vec4 tint = vec4(1.0);";
-        files[root + "gbuffers_terrain.fsh"] = "#version 120\nvoid main() { gl_FragData[1] = vec4(1.0); }";
-        check(Rejects(), "Java shader cannot write unsupported render targets");
-
-        files[root + "world0/gbuffers_terrain.fsh"] = "#version 130\n#include \"/lib/color.glsl\"\nvoid main() { gl_FragColor = tint; }";
-        files[root + "world0/final.fsh"] = post + " // overworld final";
-        files[root + "final.fsh"] = post + " // fallback final";
-        files[root + "composite.fsh"] = post + " // fallback composite";
-        pack = ReadShaderEntries(files.Keys, file => files[file]);
-        check(pack.Fragment.Contains("const vec4 tint") && pack.Post.Length == 2 &&
-            pack.Post[0].Fragment.Contains("fallback composite") && pack.Post[1].Fragment.Contains("overworld final"),
-            "Overworld shader overrides use root includes and common passes");
-        files[root + "world0/deferred10.fsh"] = post + " // deferred ten";
-        files[root + "world0/deferred1.fsh"] = post + " // deferred one";
-        pack = ReadShaderEntries(files.Keys, file => files[file]);
-        check(pack.Post.Length == 4 && pack.Post[0].Fragment.Contains("deferred one") &&
-            pack.Post[1].Fragment.Contains("deferred ten") &&
-            pack.Post[2].Fragment.Contains("fallback composite") && pack.Post[3].Fragment.Contains("overworld final"),
-            "Java deferred passes run in numeric order before composite and final");
-        files[root + "world0/shadow.fsh"] = post;
-        files[root + "world0/shadowcomp.fsh"] = post;
-        try
-        {
-            ReadShaderEntries(files.Keys, file => files[file]);
-            check(false, "Overworld package reports unsupported pass names");
-        }
-        catch (InvalidDataException ex)
-        {
-            check(ex.Message.Contains("shadow, shadowcomp"), "Overworld package reports unsupported pass names");
-        }
-        if (File.Exists("shaderpacks/Realis_v1.0_2.zip"))
-        {
-            var realisPack = ReadShaderPack("shaderpacks/Realis_v1.0_2.zip");
-            check(realisPack != null && !string.IsNullOrEmpty(realisPack.Fragment) && realisPack.Fragment.Contains("tonemapACES"),
-                "Realis Java shader pack adapts successfully to native engine");
-        }
-    }
 }
-
